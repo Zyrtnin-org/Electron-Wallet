@@ -1,3 +1,10 @@
+# Release 0.1.5
+  * Critical DAA hard fork compatibility fix for Radiant Core 2.0
+  * Updated ASERT difficulty validation to support half-life upgrade at block 410,000
+  * Added V2 ASERT anchor (block 409999) for post-upgrade header validation
+  * Fixed SPV validation to prevent wallet sync failure after hard fork
+  * Maintains backward compatibility for pre-upgrade blocks
+
 Electron Radiant is a fork of the open source Electron-Cash Bitcoin Cash Wallet and Electrum Bitcoin wallet (www.electrum.org) for Radiant (RADN) Blockchain. The current
 release is based on the Electrum 2.9.0 codebase with patches to
 
