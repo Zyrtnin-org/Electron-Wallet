@@ -26,6 +26,7 @@ def set_config(c):
 
 
 FINAL_CONFIG_VERSION = 2
+MIN_FEE_PER_KB = 10000000
 
 
 class SimpleConfig(PrintError):
@@ -313,8 +314,12 @@ class SimpleConfig(PrintError):
        if retval is None:
            retval = self.get('fee_per_kb')
        if retval is None:
-           retval = 10000000 # New wallet
-       return retval
+           retval = MIN_FEE_PER_KB
+       try:
+           retval = int(retval)
+       except (TypeError, ValueError):
+           retval = MIN_FEE_PER_KB
+       return max(MIN_FEE_PER_KB, retval)
 
     def has_custom_fee_rate(self):
         i = -1

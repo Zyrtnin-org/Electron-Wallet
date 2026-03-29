@@ -47,7 +47,7 @@ from .wallet import create_new_wallet, restore_wallet_from_text
 from .transaction import Transaction, multisig_script, OPReturn
 from .util import bfh, bh2u, format_satoshis, json_decode, print_error, to_bytes
 from .paymentrequest import PR_PAID, PR_UNCONFIRMED, PR_UNPAID, PR_UNKNOWN, PR_EXPIRED
-from .simple_config import SimpleConfig
+from .simple_config import MIN_FEE_PER_KB, SimpleConfig
 
 known_commands = {}
 
@@ -526,7 +526,7 @@ class Commands:
 
         coins = self.wallet.get_spendable_coins(domain, self.config)
         if feerate is not None:
-            fee_per_kb = 1000 * PyDecimal(feerate)
+            fee_per_kb = max(MIN_FEE_PER_KB, int(1000 * PyDecimal(feerate)))
             fee_estimator = lambda size: SimpleConfig.estimate_fee_for_feerate(fee_per_kb, size)
         else:
             fee_estimator = fee
