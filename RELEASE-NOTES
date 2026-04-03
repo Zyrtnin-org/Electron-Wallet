@@ -20,7 +20,7 @@
   * Fixed SPV validation to prevent wallet sync failure after hard fork
   * Maintains backward compatibility for pre-upgrade blocks
 
-Electron Radiant is a fork of the open source Electron-Cash Bitcoin Cash Wallet and Electrum Bitcoin wallet (www.electrum.org) for Radiant (RADN) Blockchain. The current
+Electron Radiant is a fork of the open source Electron-Cash Bitcoin Cash Wallet and Electrum Bitcoin wallet (www.electrum.org) for Radiant (RXD) Blockchain. The current
 release is based on the Electrum 2.9.0 codebase with patches to
 
 - handle Bitcoin Cash difficulty adjustment algorithm
