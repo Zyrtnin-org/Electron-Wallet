@@ -85,6 +85,8 @@ class SimpleConfig(PrintError):
         if self.requires_upgrade():
             self.upgrade()
 
+        self._normalize_custom_fee_rate()
+
         # Make a singleton instance of 'self'
         set_config(self)
 
@@ -305,9 +307,20 @@ class SimpleConfig(PrintError):
         # coreism that must die. :)
         return False
 
+    def _normalize_custom_fee_rate(self):
+        try:
+            fee = int(self.get('customfee'))
+        except (TypeError, ValueError):
+            return
+        if 0 <= fee < MIN_FEE_PER_KB:
+            self.set_key('customfee', MIN_FEE_PER_KB, save=True)
+
     def custom_fee_rate(self):
-        f = self.get('customfee')
-        return f
+        try:
+            f = int(self.get('customfee'))
+        except (TypeError, ValueError):
+            return None
+        return max(MIN_FEE_PER_KB, f) if f >= 0 else f
 
     def fee_per_kb(self):
        retval = self.get('customfee')
@@ -347,7 +360,7 @@ class SimpleConfig(PrintError):
         """Checks time since last requested and updated fee estimates.
         Returns True if an update should be requested.
         """
-        return False # For now we disable fee estimates altogether. This is BCH. 1.0 photons/B pretty much works.
+        return False # For now we disable fee estimates altogether. This is BCH. 10000 photons/B pretty much works.
         # /
         now = time.time()
         prev_updates = self.fee_estimates_last_updated.values()

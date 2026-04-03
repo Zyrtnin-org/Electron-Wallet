@@ -4,6 +4,9 @@
 # Electron Cash - Bitcoin Cash thin client
 # Copyright (C) 2017-2022 The Electron Cash Developers
 #
+# Electron Radiant - Radiant client
+# Copyright (C) 2023-2026 The Radiant Developers
+#
 # Permission is hereby granted, free of charge, to any person
 # obtaining a copy of this software and associated documentation files
 # (the "Software"), to deal in the Software without restriction,
@@ -1801,10 +1804,10 @@ class Abstract_Wallet(PrintError, SPVDelegate):
             #    is_lowfee = fee < low_fee * 0.5
             #else:
             #    is_lowfee = False
-            # and instead if it's less than 1.0 photons/B we flag it as low_fee
+            # and instead if it's less than 10000 photons/B we flag it as low_fee
             try:
                 # NB len(tx.raw) is 2x the byte size as it's hex encoded.
-                is_lowfee = int(fee) / (int(len(tx.raw)) / 2.0) < 1.0  # if less than 1.0 photons/B, complain. otherwise don't.
+                is_lowfee = int(fee) / (int(len(tx.raw)) / 2.0) < 10000.0  # if less than 10000 photons/B, complain. otherwise don't.
             except (TypeError, ValueError):  # If for some reason fee was None or invalid, just pass on through.
                 is_lowfee = False
             # /

@@ -1634,7 +1634,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.fee_custom_lbl = HelpLabel(self.get_custom_fee_text(),
                                         _('This is the fee rate that will be used for this transaction.')
                                         + "\n\n" + _('It is calculated from the Custom Fee Rate in preferences, but can be overridden from the manual fee edit on this form (if enabled).')
-                                        + "\n\n" + _('Generally, a fee of 1000 photons/B is a good minimal rate to ensure your transaction will make it into the next block.'))
+                                        + "\n\n" + _('Generally, a fee of 10000 photons/B is a good minimal rate to ensure your transaction will make it into the next block.'))
         self.fee_custom_lbl.setFixedWidth(140)
 
         self.fee_slider_mogrifier()
@@ -2204,8 +2204,8 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         #if fee > confirm_rate * tx.estimated_size() / 1000:
         #    msg.append(_('Warning') + ': ' + _("The fee for this transaction seems unusually high."))
 
-        if (fee < (tx.estimated_size())):
-            msg.append(_('Warning') + ': ' + _("You're using a fee of less than 1.0 photons/B. It may take a very long time to confirm."))
+        if (fee < (10000 * tx.estimated_size())):
+            msg.append(_('Warning') + ': ' + _("You're using a fee of less than 10000 photons/B. It may take a very long time to confirm."))
             tx.ephemeral['warned_low_fee_already'] = True
 
         if self.config.get('enable_opreturn') and self.message_opreturn_e.text():
@@ -2297,16 +2297,16 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
 
             return status, msg
 
-        # Check fee and warn if it's below 1.0 photons/B (and not warned already)
+        # Check fee and warn if it's below 10000 photons/B (and not warned already)
         fee = None
         try: fee = tx.get_fee()
         except: pass # no fee info available for tx
         # Check fee >= size otherwise warn. FIXME: If someday network relay
-        # rules change to be other than 1.0 photons/B minimum, this code needs
+        # rules change to be other than 10000 photons/B minimum, this code needs
         # to be changed.
-        if (isinstance(fee, int) and tx.is_complete() and fee < len(str(tx))//2
+        if (isinstance(fee, int) and tx.is_complete() and fee < (10000 * (len(str(tx))//2))
                 and not tx.ephemeral.get('warned_low_fee_already')):
-            msg = _('Warning') + ': ' + _("You're using a fee of less than 1.0 photons/B. It may take a very long time to confirm.") + "\n\n" + _("Proceed?")
+            msg = _('Warning') + ': ' + _("You're using a fee of less than 10000 photons/B. It may take a very long time to confirm.") + "\n\n" + _("Proceed?")
             if not self.question(msg, title = _("Low Fee")):
                 return
         # /end fee check

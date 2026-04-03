@@ -1,3 +1,8 @@
+# Release 0.1.7
+  * Raised transaction fee floor to 10000 photons/B (10,000,000 sat/kB)
+  * Updated send form fee help popup text to reference 10000 photons/B minimum
+  * Updated low-fee warnings and thresholds to 10000 photons/B in send flow
+
 # Release 0.1.6
   * Python 3.12+ compatibility: fixed ssl.match_hostname removal in interface.py
   * Python 3.12+ compatibility: replaced deprecated pkgutil/loader APIs in plugins.py
