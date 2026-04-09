@@ -9,8 +9,6 @@ from .ledger import LedgerPlugin
 from ..hw_wallet.qt import QtHandlerBase, QtPluginBase
 from electroncash_gui.qt.util import *
 
-#from btchip.btchipPersoWizard import StartBTChipPersoDialog
-
 class Plugin(LedgerPlugin, QtPluginBase):
     icon_unpaired = ":icons/ledger_unpaired.png"
     icon_paired = ":icons/ledger.png"
@@ -77,8 +75,18 @@ class Ledger_Handler(QtHandlerBase):
         return 
         
     def setup_dialog(self):
-        dialog = StartBTChipPersoDialog()
+        from electroncash_gui.qt.util import WindowModalDialog
+        from PyQt5.QtWidgets import QVBoxLayout, QLabel, QPushButton
+        dialog = WindowModalDialog(self.top_level_window(), _('Ledger Setup'))
+        vbox = QVBoxLayout(dialog)
+        vbox.addWidget(QLabel(
+            _('Please open the Bitcoin app on your Ledger device, then close this dialog.')
+        ))
+        btn = QPushButton(_('Done'))
+        btn.clicked.connect(dialog.accept)
+        vbox.addWidget(btn)
         dialog.exec_()
+        self.done.set()
 
 
         
