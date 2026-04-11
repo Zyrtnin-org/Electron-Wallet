@@ -1,3 +1,9 @@
+# Release 0.1.9
+  * Fixed missing "Use a hardware device" option in wallet creation wizard
+  * Ledger hardware wallet integration now properly accessible via Standard Wallet → Use a hardware device
+  * See Ledger.md for updated setup instructions
+  * Version bump to 0.1.9
+
 # Release 0.1.8
   * ASERT DAA test vectors regenerated for Radiant IDEAL_BLOCK_TIME=300s (5-minute blocks)
   * Fixed ASERT test suite: all 10 tests now pass with correct Radiant parameters

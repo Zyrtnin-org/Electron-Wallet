@@ -58,15 +58,18 @@ python3 -c "import hid; from btchip.btchip import btchip; print('OK')"
 2. **Connect your Ledger** via USB and unlock it with your PIN.
 3. **Open the Bitcoin app** on the Ledger device.
 4. **Launch Electron Radiant**.
-5. Go to **File → New/Restore Wallet** and choose **"Hardware wallet"**.
-6. Select **Ledger** from the list of hardware wallet types.
-7. Follow the on-screen prompts. Electron Radiant will derive your Radiant addresses from
+5. Go to **File → New/Restore Wallet**, enter a wallet name, and click **Next**.
+6. Select **Standard wallet** and click **Next**.
+7. Select **Use a hardware device** and click **Next**.
+8. Select **Ledger** from the list of hardware wallet types.
+9. Follow the on-screen prompts. Electron Radiant will derive your Radiant addresses from
    the device and display them for confirmation.
 
 > **Tip:** If the wallet wizard does not detect your Ledger, make sure:
 > - The Bitcoin app is open on the device (not the dashboard).
 > - No other application (e.g. Ledger Live) is currently connected to the device.
 > - On Linux, udev rules for Ledger are installed (see below).
+> - The `btchip-python` library is installed (`pip install btchip-python`). Without this library, the "Use a hardware device" option will not appear.
 
 ---
 
@@ -133,6 +136,7 @@ If your firmware is too old, Electron Radiant will show an error with a link to 
 | Device not found on Linux | Install udev rules (see Linux section above) |
 | `ImportError: No module named 'hid'` | Run `pip install hidapi` |
 | `ImportError: No module named 'btchip'` | Run `pip install btchip-python` |
+| **"Use a hardware device" option not showing** | Ensure `btchip-python` is installed. The option only appears when the Ledger library is available. See Prerequisites above. |
 
 ---
 

@@ -118,6 +118,7 @@ class BaseWizard(util.PrintError):
                 ('create_standard_seed', _('Create a new seed')),
                 ('restore_from_seed', _('I already have a seed')),
                 ('restore_from_key', _('Use public or private keys')),
+                ('choose_hw_device', _('Use a hardware device')),
             ]
         else:
             message = _('Add a cosigner to your multi-sig wallet')
