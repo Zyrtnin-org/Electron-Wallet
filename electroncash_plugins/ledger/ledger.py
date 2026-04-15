@@ -374,6 +374,30 @@ class Ledger_KeyStore(Hardware_KeyStore):
                 if txin['type'] != 'p2sh':
                     self.give_error(_('P2SH / regular input mixed in same transaction not supported')) # should never happen
 
+        # Radiant Ledger app v1 canonical-P2PKH pre-check
+        # ------------------------------------------------
+        # The community Radiant Ledger app enforces canonical 25-byte P2PKH on
+        # every output as a v1 simplification (makes totalRefs=0 a proven
+        # invariant in the hashOutputHashes computation). Pre-checking in the
+        # plugin gives the user a clear error in the wallet UI BEFORE any
+        # device APDU happens — avoids the "approve on device → device rejects
+        # with cryptic status code" UX. Plan §1.5.3 task 8.
+        #
+        # Canonical P2PKH scriptPubKey format (hex):
+        #   76 a9 14 <20 bytes pubkey-hash> 88 ac  = 50 hex chars
+        for o in tx.outputs():
+            _type, addr, amount = o
+            script_hex = tx.pay_script(addr)
+            if len(script_hex) != 50 or not script_hex.startswith('76a914') or not script_hex.endswith('88ac'):
+                self.give_error(_(
+                    "Radiant Ledger app v1 supports only canonical P2PKH outputs "
+                    "(addresses starting with '1'). This send includes a non-P2PKH "
+                    "output (possibly a P2SH address starting with '3', or an "
+                    "OP_RETURN memo). Use the software Electron Radiant wallet for "
+                    "these sends, or wait for v2 of the Ledger app. See migration "
+                    "docs for details."
+                ))
+
         txOutput = var_int(len(tx.outputs()))
         for txout in tx.outputs():
             output_type, addr, amount = txout
