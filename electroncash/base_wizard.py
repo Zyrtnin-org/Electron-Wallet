@@ -266,7 +266,14 @@ class BaseWizard(util.PrintError):
             # This is partially compatible with BIP45; assumes index=0
             default_derivation = "m/45'/0"
         else:
-            default_derivation = keystore.bip44_derivation(0)
+            # Radiant hardware wallets derive at SLIP-44 coin_type 512.
+            # Software wallets continue using coin_type 0 for ecosystem
+            # compatibility with Samara/Electron/Chainbow.
+            # Users importing a seed that already has funds at m/44'/0'
+            # must first move those funds to their new Ledger address at
+            # m/44'/512'/0'/0/0 — see MIGRATION docs in the Radiant
+            # Ledger app repo.
+            default_derivation = keystore.bip44_derivation(0, coin_type=512)
         self.derivation_dialog(f, default_derivation)
 
     def derivation_dialog(self, f, default_derivation, seed=''):

@@ -587,7 +587,12 @@ class LedgerPlugin(HW_PluginBase):
             # BaseWizard expects this Exception to re-try
             raise OSError(_('Device id not found or was changed'))
         client.handler = self.create_handler(wizard)
-        client.get_xpub("m/44'/0'/0'", 'standard')  # BIP44 coin type 0 (Bitcoin/Radiant)
+        # Sanity probe: request an xpub at the Radiant SLIP-44 path. The
+        # Radiant Ledger app's runtime path-lock refuses anything outside
+        # m/44'/512' with SW_INCORRECT_DATA, so this probe also verifies
+        # we're talking to the Radiant app rather than, say, the stock
+        # Bitcoin app that happens to answer to our CLA byte.
+        client.get_xpub("m/44'/512'/0'", 'standard')  # SLIP-44 RXD
 
     def get_xpub(self, device_id, derivation, xtype, wizard):
         devmgr = self.device_manager()

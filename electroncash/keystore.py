@@ -741,10 +741,20 @@ is_private_key = lambda x: is_xprv(x) or is_private_key_list(x)
 is_bip32_key = lambda x: is_xprv(x) or is_xpub(x)
 
 
-def bip44_derivation(account_id):
+def bip44_derivation(account_id, *, coin_type=None):
+    """Build a BIP44 derivation path.
+
+    coin_type override allows hardware-wallet flows to use a coin type
+    different from the Radiant software-wallet default. v1 Radiant Ledger
+    app uses SLIP-44 coin type 512 per
+    https://github.com/satoshilabs/slips/blob/master/slip-0044.md
+    while software wallets continue to derive at coin_type=0 for
+    ecosystem compatibility with Samara/Electron/Chainbow.
+    """
     bip  = 44
-    coin = 1 if networks.net.TESTNET else 0
-    return "m/%d'/%d'/%d'" % (bip, coin, int(account_id))
+    if coin_type is None:
+        coin_type = 1 if networks.net.TESTNET else 0
+    return "m/%d'/%d'/%d'" % (bip, coin_type, int(account_id))
 
 def bip39_normalize_passphrase(passphrase):
     """ This is called by some plugins """
