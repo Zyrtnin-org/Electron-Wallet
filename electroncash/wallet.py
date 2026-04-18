@@ -987,6 +987,8 @@ class Abstract_Wallet(PrintError, SPVDelegate):
                 'is_frozen_coin':txo in self.frozen_coins or txo in self.frozen_coins_tmp,
                 'slp_token':self.slp.token_info_for_txo(txo),  # (token_id_hex, qty) tuple or None
                 'glyph_token':self.glyph.is_glyph_ref(txo),  # True if this UTXO carries a Glyph token reference
+                'glyph_kind':self.glyph.kind_for_txo(txo),   # 'ft_holder' | 'nft_singleton' | None (loose-prefix)
+                'glyph_ref':self.glyph.ref_info_for_txo(txo),  # 72-char ref hex or None
             }
             out[txo] = x
         return out
@@ -2293,9 +2295,33 @@ class Abstract_Wallet(PrintError, SPVDelegate):
             txin['type'] = self.get_txin_type(address)
             # Bitcoin Cash needs value to sign
             received, spent = self.get_addr_io(address)
-            item = received.get(txin['prevout_hash']+':%d'%txin['prevout_n'])
+            txo_key = txin['prevout_hash']+':%d'%txin['prevout_n']
+            item = received.get(txo_key)
             tx_height, value, is_cb = item
             txin['value'] = value
+            # Glyph-aware signing: if this coin is a classifier-recognized
+            # FT holder or NFT singleton, switch the txin type so
+            # get_preimage_script emits the full 75B/63B scriptPubKey
+            # (Radiant's sighash covers the whole thing — no cut at
+            # OP_STATESEPARATOR; see docs/research/2026-04-18-radiant-
+            # sighash-cutpoint.md). scriptSig format stays <sig><pubkey>,
+            # same as plain P2PKH.
+            glyph_kind = self.glyph.kind_for_txo(txo_key)
+            if glyph_kind in ('ft_holder', 'nft_singleton'):
+                txin['type'] = 'glyph_' + glyph_kind.split('_')[0]  # ft_holder -> glyph_ft, nft_singleton -> glyph_nft
+                # Populate prev_scriptPubKey_hex from the stored parent tx.
+                # This is the only source of truth for the full script —
+                # the txin's `address` carries only the 25B P2PKH prologue
+                # because the classifier mapped the output to TYPE_ADDRESS.
+                prev_spk_hex = self.glyph.prev_scriptpubkey_hex_for_txo(txo_key)
+                if prev_spk_hex is None:
+                    # Parent tx not in wallet store — can't sign safely.
+                    # Fall back to p2pkh type; signing will fail consensus
+                    # but the wallet won't crash.
+                    txin['type'] = 'p2pkh'
+                else:
+                    txin['prev_scriptPubKey_hex'] = prev_spk_hex
+                    txin['glyph_ref'] = self.glyph.ref_info_for_txo(txo_key)
             self.add_input_sig_info(txin, address)
 
     def can_sign(self, tx):
@@ -3022,7 +3048,11 @@ class ImportedPrivkeyWallet(ImportedWalletBase):
         return self.keystore.export_private_key(pubkey, password)
 
     def add_input_sig_info(self, txin, address):
-        assert txin['type'] == 'p2pkh'
+        # Glyph FT holder / NFT singleton inputs sign with the same
+        # scriptSig shape as plain P2PKH (<sig> <pubkey>). Only the
+        # preimage scriptCode differs (handled by get_preimage_script).
+        assert txin['type'] in ('p2pkh', 'glyph_ft', 'glyph_nft'), \
+            f"unsupported txin type for keystore signing: {txin['type']}"
         pubkey = self.keystore.address_to_pubkey(address)
         txin['num_sig'] = 1
         txin['x_pubkeys'] = [pubkey.to_ui_string()]
@@ -3154,7 +3184,11 @@ class RpaWallet(ImportedWalletBase):
         return bitcoin.serialize_privkey(pk, compressed, self.txin_type)
 
     def add_input_sig_info(self, txin, address):
-        assert txin['type'] == 'p2pkh'
+        # Glyph FT holder / NFT singleton inputs sign with the same
+        # scriptSig shape as plain P2PKH (<sig> <pubkey>). Only the
+        # preimage scriptCode differs (handled by get_preimage_script).
+        assert txin['type'] in ('p2pkh', 'glyph_ft', 'glyph_nft'), \
+            f"unsupported txin type for keystore signing: {txin['type']}"
         pubkey = self.keystore.address_to_pubkey(address)
         txin['num_sig'] = 1
         txin['x_pubkeys'] = [pubkey.to_ui_string()]

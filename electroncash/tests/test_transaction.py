@@ -443,6 +443,88 @@ class TestRadiantPreimage(unittest.TestCase):
                 "parity with radiant-node's hashOutputHashes computation.")
 
 
+class TestGlyphInputPreimageScript(unittest.TestCase):
+    """PR B: get_preimage_script dispatches on txin['type'] and returns
+    the full 75B FT / 63B NFT script for Glyph inputs.
+
+    The existing `p2pkh` branch returns the 25B P2PKH script from
+    txin['address'].to_script(). For Glyph inputs we need the FULL
+    original scriptPubKey (sighash covers everything; no cut at
+    OP_STATESEPARATOR). The full script lives on the txin as
+    `prev_scriptPubKey_hex`, populated by add_input_info from the
+    wallet's stored parent tx."""
+
+    def test_p2pkh_returns_25B_P2PKH(self):
+        """Baseline regression: plain P2PKH inputs still return the
+        25-byte script from the address."""
+        addr = Address.from_P2PKH_hash(bytes.fromhex('8dd3483e21c8d1abf199230d6854580e4b2fbbd2'))
+        txin = {'type': 'p2pkh', 'address': addr}
+        result = transaction.Transaction.get_preimage_script(txin)
+        self.assertEqual(result, '76a9148dd3483e21c8d1abf199230d6854580e4b2fbbd288ac')
+        self.assertEqual(len(result) // 2, 25)
+
+    def test_glyph_ft_returns_full_75B_script(self):
+        """FT holder inputs return the full 75-byte template."""
+        ft_spk_hex = (
+            '76a914e9aa4adbe3a3f07887d67d9cedae324711f053ef88ac'
+            'bdd08b87c3c771b1a9f5015a4f26bfd80979ed196b5366257a6f30929646dfd943a4'
+            '00000000dec0e9aa76e378e4a269e69d'
+        )
+        self.assertEqual(len(ft_spk_hex) // 2, 75)
+        txin = {'type': 'glyph_ft', 'prev_scriptPubKey_hex': ft_spk_hex}
+        result = transaction.Transaction.get_preimage_script(txin)
+        self.assertEqual(result, ft_spk_hex)
+
+    def test_glyph_nft_returns_full_63B_script(self):
+        """NFT singleton inputs return the full 63-byte template."""
+        nft_spk_hex = (
+            'd808480623910ba219a0903afa9f10140c31c30f0529d51f860401cb79caf24ed0000000007576a914a9763e88160a63a3f03bf846268ed0fb8abd8b5588ac'
+        )
+        self.assertEqual(len(nft_spk_hex) // 2, 63)
+        txin = {'type': 'glyph_nft', 'prev_scriptPubKey_hex': nft_spk_hex}
+        result = transaction.Transaction.get_preimage_script(txin)
+        self.assertEqual(result, nft_spk_hex)
+
+    def test_glyph_ft_missing_prev_scriptpubkey_raises(self):
+        """Defensive: a Glyph txin that somehow lost its
+        prev_scriptPubKey_hex (buggy caller) must fail loudly at
+        preimage assembly, not silently emit an empty script."""
+        txin = {'type': 'glyph_ft'}  # no prev_scriptPubKey_hex
+        with self.assertRaises(KeyError):
+            transaction.Transaction.get_preimage_script(txin)
+
+
+class TestGlyphInputScriptSigShape(unittest.TestCase):
+    """PR B: input_script (scriptSig construction) treats glyph_ft and
+    glyph_nft the same as p2pkh — <sig> <pubkey>. Radiant's sighash
+    preimage differs for these types (full script, not 25B P2PKH) but
+    the scriptSig form is identical."""
+
+    def test_glyph_ft_scriptsig_is_sig_plus_pubkey(self):
+        """Estimated scriptSig for glyph_ft has the same shape as p2pkh:
+        a signature push followed by a pubkey push. No redeem script or
+        multisig wrapping."""
+        addr = Address.from_P2PKH_hash(bytes.fromhex('8dd3483e21c8d1abf199230d6854580e4b2fbbd2'))
+        txin_ft = {
+            'type': 'glyph_ft',
+            'address': addr,
+            'num_sig': 1,
+            'signatures': [None],
+            'x_pubkeys': ['02' + '00' * 32],
+        }
+        txin_p2pkh = {
+            'type': 'p2pkh',
+            'address': addr,
+            'num_sig': 1,
+            'signatures': [None],
+            'x_pubkeys': ['02' + '00' * 32],
+        }
+        # Estimated sizes must match — same scriptSig shape.
+        ft_script = transaction.Transaction.input_script(txin_ft, estimate_size=True)
+        p2pkh_script = transaction.Transaction.input_script(txin_p2pkh, estimate_size=True)
+        self.assertEqual(len(ft_script), len(p2pkh_script))
+
+
 class NetworkMock(object):
 
     def __init__(self, unspent):

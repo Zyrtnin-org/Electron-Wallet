@@ -662,7 +662,13 @@ class Transaction:
             script = '00' + script
             redeem_script = multisig_script(pubkeys, txin['num_sig'])
             script += push_script(redeem_script)
-        elif _type == 'p2pkh':
+        elif _type in ('p2pkh', 'glyph_ft', 'glyph_nft'):
+            # Glyph FT holders and NFT singletons use the same scriptSig
+            # form as plain P2PKH: <sig> <pubkey>. The Glyph-specific
+            # tail (OP_STATESEPARATOR / OP_PUSHINPUTREF + ref + epilogue)
+            # only affects the sighash preimage (see get_preimage_script),
+            # NOT the scriptSig format. Confirmed via Pinball's
+            # production transfer_nft.js and radiant-node source.
             script += push_script(pubkeys[0])
         elif _type == 'unknown':
             raise RuntimeError('Cannot serialize unknown input with missing scriptSig')
@@ -685,6 +691,17 @@ class Transaction:
         _type = txin['type']
         if _type == 'p2pkh':
             return txin['address'].to_script().hex()
+        elif _type in ('glyph_ft', 'glyph_nft'):
+            # Radiant's sighash preimage for Glyph inputs covers the FULL
+            # original scriptPubKey — the 75B FT holder template or the
+            # 63B NFT singleton template — NOT the 25B P2PKH prologue
+            # alone. Verified at radiant-node/src/script/interpreter.cpp
+            # :2645 (SignatureHash serializes scriptCode verbatim; no cut
+            # at OP_STATESEPARATOR). The wallet populates
+            # `prev_scriptPubKey_hex` on the txin during add_input_info
+            # from the already-scanned coin data (no extra RPC needed
+            # since we classified the output when the UTXO first appeared).
+            return txin['prev_scriptPubKey_hex']
         elif _type == 'p2sh':
             pubkeys, x_pubkeys = self.get_sorted_pubkeys(txin)
             return multisig_script(pubkeys, txin['num_sig'])

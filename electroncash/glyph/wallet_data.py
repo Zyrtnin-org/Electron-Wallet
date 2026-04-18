@@ -19,6 +19,11 @@ class WalletData(PrintError):
         self.ref_txos = set()
         # Maps txo string → first reference ID bytes (for display)
         self.ref_ids = {}
+        # Maps txo string → kind ('ft_holder' | 'nft_singleton') for the
+        # two classifier-recognized shapes. Loose-prefix (non-template)
+        # refs carry None — they're still tracked in ref_txos but not
+        # considered spendable via the Glyph-aware signing path.
+        self.kinds = {}
         self.need_rebuild = False
 
     def diagnostic_name(self):
@@ -27,10 +32,11 @@ class WalletData(PrintError):
     def clear(self):
         self.ref_txos.clear()
         self.ref_ids.clear()
+        self.kinds.clear()
 
     def is_glyph_ref(self, txo):
         """Returns True if the given txo (string 'txid:n') is a Glyph
-        reference UTXO that should not be spent."""
+        reference UTXO that should not be spent via the normal RXD path."""
         return txo in self.ref_txos
 
     def ref_info_for_txo(self, txo):
@@ -39,6 +45,36 @@ class WalletData(PrintError):
         if ref_id is not None:
             return ref_id.hex()
         return None
+
+    def kind_for_txo(self, txo):
+        """Returns the classifier kind for the given txo ('ft_holder' or
+        'nft_singleton') or None if the txo is a ref-prefixed shape that
+        wasn't recognized by the template classifier (e.g. 241B FT
+        control, dMint containers). Callers that sign Glyph inputs only
+        accept the two template kinds."""
+        return self.kinds.get(txo)
+
+    def prev_scriptpubkey_hex_for_txo(self, txo):
+        """Returns the raw scriptPubKey hex for a Glyph txo by looking up
+        the parent transaction in the wallet store. Used by
+        add_input_info to populate `prev_scriptPubKey_hex` on a txin —
+        this is the full 75B / 63B script that Radiant's sighash preimage
+        covers (not the 25B P2PKH prologue that addr.to_script() returns
+        after the classifier mapped the output to TYPE_ADDRESS).
+
+        Returns None if the parent tx isn't in the wallet's store."""
+        try:
+            tx_hash, n_str = txo.rsplit(':', 1)
+            n = int(n_str)
+        except (ValueError, AttributeError):
+            return None
+        parent = self.wallet.transactions.get(tx_hash)
+        if parent is None:
+            return None
+        raw = parent.output_script(n)
+        if raw is None:
+            return None
+        return raw.hex()
 
     def add_tx(self, tx_hash, tx):
         """Scan a transaction for Glyph reference outputs and track them.
@@ -60,14 +96,17 @@ class WalletData(PrintError):
             # balance grouping.
             gm = classify_glyph_output(raw_script)
             if gm is not None:
-                _kind, _pkh, ref_bytes = gm
+                kind, _pkh, ref_bytes = gm
                 txo = f"{tx_hash}:{n}"
                 self.ref_txos.add(txo)
+                self.kinds[txo] = kind
                 if ref_bytes is not None:
                     self.ref_ids[txo] = ref_bytes
                 continue
             # Fall back to loose prefix detection for shapes the precise
             # classifier doesn't recognize (241B FT control, dMint, etc).
+            # These have no classifier `kind` — intentional: they are not
+            # spendable via the Glyph-aware signing path.
             if has_radiant_refs(raw_script):
                 txo = f"{tx_hash}:{n}"
                 self.ref_txos.add(txo)
@@ -83,6 +122,7 @@ class WalletData(PrintError):
         for txo in to_remove:
             self.ref_txos.discard(txo)
             self.ref_ids.pop(txo, None)
+            self.kinds.pop(txo, None)
 
     def load(self):
         """Load persisted glyph data from wallet storage."""
@@ -95,12 +135,21 @@ class WalletData(PrintError):
                            if isinstance(v, str)}
         else:
             self.need_rebuild = True
+        data = self.wallet.storage.get('glyph_kinds')
+        if isinstance(data, dict):
+            self.kinds = {k: v for k, v in data.items()
+                          if isinstance(v, str)}
+        else:
+            # Old wallets have ref_txos but no persisted kinds; force a
+            # rebuild so the classifier populates them.
+            self.need_rebuild = True
 
     def save(self):
         """Persist glyph data to wallet storage."""
         self.wallet.storage.put('glyph_ref_txos', list(self.ref_txos))
         self.wallet.storage.put('glyph_ref_ids',
                                 {k: v.hex() for k, v in self.ref_ids.items()})
+        self.wallet.storage.put('glyph_kinds', self.kinds)
 
     def rebuild(self):
         """Rebuild glyph data from wallet transactions."""
