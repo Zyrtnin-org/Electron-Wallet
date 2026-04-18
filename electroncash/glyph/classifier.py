@@ -132,6 +132,70 @@ def extract_ref_id(script_bytes):
     return bytes(script_bytes[1:1 + REF_DATA_SIZE])
 
 
+def extract_all_pushrefs(script_bytes):
+    """Walk a script and collect every OP_PUSHINPUTREF (0xd0) and
+    OP_PUSHINPUTREFSINGLETON (0xd8) argument. Returns a list of raw
+    36-byte refs in the order they appear in the script (caller must
+    sort/dedupe if they need the canonical set ordering used by Radiant's
+    `GetPushRefs` / `hashOutputHashes` summary).
+
+    Mirrors radiant-node's GetPushRefs (src/script/script.cpp:549):
+    OP_PUSHINPUTREFSINGLETON (0xd8) refs are inserted into the same
+    pushRefSet as OP_PUSHINPUTREF (0xd0) refs, so both kinds contribute
+    to the per-output refs hash.
+
+    This is the general-purpose ref walker used by the sighash per-output
+    summary in `transaction.py::serialize_hash_output`. It handles any
+    script shape — 63B NFT singleton, 75B FT holder, 241B FT control,
+    dMint containers — not just the two classifier templates.
+
+    OP_DROP, OP_REQUIREINPUTREF, OP_DISALLOWPUSHINPUTREF, and standard
+    push opcodes are stepped over but not collected (matches the C++
+    `pushRefSet` semantics — require/disallow refs go into their own
+    sets, not pushRefSet). Malformed scripts (truncated ref, unknown
+    opcode with bad layout) silently stop iteration at the fault point.
+    """
+    refs = []
+    i = 0
+    n = len(script_bytes)
+    while i < n:
+        op = script_bytes[i]
+        if op == OP_PUSHINPUTREF or op == OP_PUSHINPUTREFSINGLETON:
+            if i + 1 + REF_DATA_SIZE > n:
+                break  # truncated — stop here
+            refs.append(bytes(script_bytes[i + 1:i + 1 + REF_DATA_SIZE]))
+            i += 1 + REF_DATA_SIZE
+        elif op == OP_REQUIREINPUTREF:
+            # Has a 36B arg but does NOT contribute to pushRefSet.
+            if i + 1 + REF_DATA_SIZE > n:
+                break
+            i += 1 + REF_DATA_SIZE
+        elif op == OP_DISALLOWPUSHINPUTREF:
+            i += 1  # single-byte marker
+        elif 1 <= op <= 75:
+            # Standard push of `op` bytes.
+            i += 1 + op
+        elif op == 0x4c:  # OP_PUSHDATA1
+            if i + 2 > n:
+                break
+            plen = script_bytes[i + 1]
+            i += 2 + plen
+        elif op == 0x4d:  # OP_PUSHDATA2
+            if i + 3 > n:
+                break
+            plen = int.from_bytes(script_bytes[i + 1:i + 3], 'little')
+            i += 3 + plen
+        elif op == 0x4e:  # OP_PUSHDATA4
+            if i + 5 > n:
+                break
+            plen = int.from_bytes(script_bytes[i + 1:i + 5], 'little')
+            i += 5 + plen
+        else:
+            # All non-push opcodes are single-byte in Bitcoin's script.
+            i += 1
+    return refs
+
+
 # ---------------------------------------------------------------------------
 # Precise shape classifier.
 #

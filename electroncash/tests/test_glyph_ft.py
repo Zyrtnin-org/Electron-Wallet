@@ -353,5 +353,76 @@ class AssertFtInvariantsStubTests(unittest.TestCase):
             glyph.assert_ft_invariants([], [], b'\x00' * 36)
 
 
+class ExtractAllPushrefsTests(unittest.TestCase):
+    """extract_all_pushrefs walks any script and collects every
+    OP_PUSHINPUTREF + OP_PUSHINPUTREFSINGLETON argument. Used by
+    serialize_hash_output to compute the per-output refs hash for
+    Radiant's hashOutputHashes sighash extension.
+
+    Mirrors radiant-node's GetPushRefs (src/script/script.cpp:549):
+    both kinds contribute to pushRefSet; require/disallow refs are
+    stepped over but NOT collected."""
+
+    def test_plain_p2pkh_has_no_pushrefs(self):
+        p2pkh = bytes.fromhex('76a914800d0414e758f790a48ad0f2960d566ef56cd5bf88ac')
+        self.assertEqual(glyph.extract_all_pushrefs(p2pkh), [])
+
+    def test_ft_holder_has_one_pushref(self):
+        ft_spk = bytes.fromhex(FT_VECTORS[0][1])
+        refs = glyph.extract_all_pushrefs(ft_spk)
+        self.assertEqual(len(refs), 1)
+        self.assertEqual(refs[0].hex(), FT_VECTORS[0][3])
+
+    def test_ft_control_script_has_two_pushrefs(self):
+        """The 241B FT mint-authority control script contains one
+        OP_PUSHINPUTREFSINGLETON + one OP_PUSHINPUTREF, both of which go
+        into pushRefSet per radiant-node's GetPushRefs. Matches mainnet
+        tx 8ab5cf40...e2ea92f vout[0]."""
+        ctrl_hex = (
+            '04bcd00000d88b87c3c771b1a9f5015a4f26bfd80979ed196b5366257a6f30929646dfd9'
+            '43a408000000d08b87c3c771b1a9f5015a4f26bfd80979ed196b5366257a6f30929646df'
+            'd943a400000000036889090350c3000874da40a70d74da00bd5175c0c855797ea859795'
+            '9797ea87e5a7a7eaabc01147f77587f040000000088817600a269a269577ae500a06956'
+            '7ae600a06901d053797e0cdec0e9aa76e378e4a269e69d7eaa76e47b9d547a818b76537'
+            'a9c537ade789181547ae6939d635279cd01d853797e016a7e886778de519d547854807e'
+            'c0eb557f777e5379ec78885379eac0e9885379cc519d75686d7551'
+        )
+        refs = glyph.extract_all_pushrefs(bytes.fromhex(ctrl_hex))
+        self.assertEqual(len(refs), 2)
+        # Singleton push comes first in script order.
+        self.assertEqual(
+            refs[0].hex(),
+            '8b87c3c771b1a9f5015a4f26bfd80979ed196b5366257a6f30929646dfd943a408000000',
+        )
+        # Plain push ref second.
+        self.assertEqual(
+            refs[1].hex(),
+            '8b87c3c771b1a9f5015a4f26bfd80979ed196b5366257a6f30929646dfd943a400000000',
+        )
+
+    def test_truncated_ref_stops_iteration_safely(self):
+        """A script that declares OP_PUSHINPUTREF but truncates before the
+        full 36 bytes must not over-read. Walker stops without raising."""
+        # OP_PUSHINPUTREF (0xd0) + only 10 bytes of ref data.
+        truncated = bytes.fromhex('d0') + b'\x00' * 10
+        refs = glyph.extract_all_pushrefs(truncated)
+        self.assertEqual(refs, [])
+
+    def test_nft_singleton_has_one_pushref(self):
+        """An NFT singleton (63B) has exactly one OP_PUSHINPUTREFSINGLETON
+        ref, which DOES contribute to pushRefSet (not just the singleton
+        set — GetPushRefs inserts singletons into both)."""
+        nft_hex = 'd808480623910ba219a0903afa9f10140c31c30f0529d51f860401cb79caf24ed0000000007576a914a9763e88160a63a3f03bf846268ed0fb8abd8b5588ac'
+        refs = glyph.extract_all_pushrefs(bytes.fromhex(nft_hex))
+        self.assertEqual(len(refs), 1)
+        self.assertEqual(
+            refs[0].hex(),
+            '08480623910ba219a0903afa9f10140c31c30f0529d51f860401cb79caf24ed000000000',
+        )
+
+    def test_empty_script_returns_no_refs(self):
+        self.assertEqual(glyph.extract_all_pushrefs(b''), [])
+
+
 if __name__ == '__main__':
     unittest.main()
