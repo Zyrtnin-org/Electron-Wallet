@@ -987,6 +987,8 @@ class Abstract_Wallet(PrintError, SPVDelegate):
                 'is_frozen_coin':txo in self.frozen_coins or txo in self.frozen_coins_tmp,
                 'slp_token':self.slp.token_info_for_txo(txo),  # (token_id_hex, qty) tuple or None
                 'glyph_token':self.glyph.is_glyph_ref(txo),  # True if this UTXO carries a Glyph token reference
+                'glyph_kind':self.glyph.kind_for_txo(txo),   # 'ft_holder' | 'nft_singleton' | None (loose-prefix)
+                'glyph_ref':self.glyph.ref_info_for_txo(txo),  # 72-char ref hex or None
             }
             out[txo] = x
         return out
@@ -1144,6 +1146,34 @@ class Abstract_Wallet(PrintError, SPVDelegate):
             uu += u
             xx += x
         return cc, uu, xx
+
+    def get_ft_balances(self):
+        """Per-ref summed photon balance across all Glyph FT holder UTXOs
+        in the wallet. Returns a dict keyed by 36-byte ref hex →
+        {'balance': int photons, 'utxo_count': int}.
+
+        Used by the Tokens tab (PR F+G) and the Send-tab Asset dropdown.
+        Unlike `get_balance`, this pulls from `glyph.ref_ids` + live UTXO
+        values rather than cached balance counters — cheap enough for
+        desktop scale (hundreds of UTXOs).
+
+        NFT singletons are excluded (they're 1-sat each and aren't
+        fungible)."""
+        balances = {}
+        # Pull fresh FT coins, bypassing the exclude_glyph=True default.
+        coins = self.get_utxos(exclude_frozen=True, mature=True,
+                               confirmed_only=False, exclude_slp=True,
+                               exclude_glyph=False)
+        for c in coins:
+            if c.get('glyph_kind') != 'ft_holder':
+                continue
+            ref = c.get('glyph_ref')
+            if not ref:
+                continue
+            slot = balances.setdefault(ref, {'balance': 0, 'utxo_count': 0})
+            slot['balance'] += c['value']
+            slot['utxo_count'] += 1
+        return balances
 
     def get_address_history(self, address):
         assert isinstance(address, Address)
@@ -2029,28 +2059,295 @@ class Abstract_Wallet(PrintError, SPVDelegate):
             outputs[i_max] = (_type, data, amount)
             tx = Transaction.from_io(inputs, outputs, sign_schnorr=sign_schnorr)
 
+        self._finalize_unsigned_tx(tx)
+        return tx
+
+    def _finalize_unsigned_tx(self, tx):
+        """Post-processing applied to every unsigned tx before it
+        leaves the wallet: ExcessiveFee guard, BIP_LI01 sort, locktime
+        assignment, and the `make_unsigned_transaction` plugin hook.
+
+        Extracted so make_unsigned_ft_transaction (PR D) can honor the
+        same wallet-level invariants as the plain-RXD path without
+        duplicating code. Architect review flagged that bypassing the
+        canonical make_unsigned_transaction would silently lose these
+        checks; this helper closes the gap."""
         # If user tries to send too big of a fee (more than 500000 sat/byte), stop them from shooting themselves in the foot
-        tx_in_bytes=tx.estimated_size()
-        fee_in_satoshis=tx.get_fee()
-        sats_per_byte=fee_in_satoshis/tx_in_bytes
-        if (sats_per_byte > 500000):
+        tx_in_bytes = tx.estimated_size()
+        fee_in_satoshis = tx.get_fee()
+        sats_per_byte = fee_in_satoshis / tx_in_bytes
+        if sats_per_byte > 500000:
             raise ExcessiveFee()
 
         # Sort the inputs and outputs deterministically
         tx.BIP_LI01_sort()
         # Timelock tx to current height.
         locktime = self.get_local_height()
-        if locktime == -1: # We have no local height data (no headers synced).
+        if locktime == -1:  # We have no local height data (no headers synced).
             locktime = 0
         tx.locktime = locktime
         run_hook('make_unsigned_transaction', self, tx)
-
-        return tx
 
     def mktx(self, outputs, password, config, fee=None, change_addr=None, domain=None, sign_schnorr=None):
         coins = self.get_spendable_coins(domain, config)
         tx = self.make_unsigned_transaction(coins, outputs, config, fee, change_addr, sign_schnorr=sign_schnorr)
         self.sign_transaction(tx, password)
+        return tx
+
+    # ----- Radiant Glyph FT-send flow -------------------------------------
+    #
+    # The public entry point is make_unsigned_ft_transaction; callers get
+    # back an unsigned Transaction which they sign via
+    # self.sign_transaction(tx, password) and broadcast separately.
+    #
+    # Split into three private helpers (each unit-testable via the public
+    # method); the helpers are ordinary methods, not free functions, so
+    # they can read self.glyph / self.get_utxos / self.get_change_addresses
+    # without plumbing through arguments.
+
+    def _select_ft_inputs(self, target_ref_hex, amount_photons):
+        """Pick a minimal set of FT UTXOs (all sharing target_ref) whose
+        summed photons cover `amount_photons`. Greedy largest-first.
+
+        Returns (ft_coins, ft_change_photons). Raises SendFtError on
+        insufficient FT balance."""
+        from .glyph import FT_DUST_THRESHOLD, SendFtError
+        all_coins = self.get_utxos(exclude_frozen=True, mature=True,
+                                   confirmed_only=False, exclude_slp=True,
+                                   exclude_glyph=False)
+        ft_coins = [
+            c for c in all_coins
+            if c.get('glyph_kind') == 'ft_holder'
+            and c.get('glyph_ref') == target_ref_hex
+        ]
+        if not ft_coins:
+            raise SendFtError(
+                'ref_mismatch',
+                f'no FT holder UTXOs with ref {target_ref_hex} in wallet')
+
+        # Greedy largest-first.
+        ft_coins.sort(key=lambda c: c['value'], reverse=True)
+        picked = []
+        picked_sum = 0
+        for c in ft_coins:
+            picked.append(c)
+            picked_sum += c['value']
+            if picked_sum >= amount_photons:
+                break
+        if picked_sum < amount_photons:
+            raise SendFtError(
+                'ref_mismatch',
+                f'insufficient FT balance: have {picked_sum} photons, '
+                f'need {amount_photons}')
+        ft_change_photons = picked_sum - amount_photons
+        if 0 < ft_change_photons < FT_DUST_THRESHOLD:
+            raise SendFtError(
+                'dust_change',
+                f'FT change of {ft_change_photons} photons below dust '
+                f'threshold {FT_DUST_THRESHOLD}; send the full balance '
+                f'({picked_sum} photons) or pick a larger FT UTXO')
+        if len(picked) > 3:
+            # Privacy warning: greedy consolidation reveals the largest
+            # remaining UTXOs. Log but don't block.
+            self.print_error(
+                f'[glyph] FT send consolidating {len(picked)} UTXOs '
+                f'(target_ref={target_ref_hex[:12]}...); privacy loss')
+        return picked, ft_change_photons
+
+    def _build_ft_outputs(self, recipient_address, amount_photons,
+                          change_address, ft_change_photons, target_ref):
+        """Build the FT output list: recipient (always) + self-change
+        (only if ft_change_photons > 0). Pure function; no wallet state.
+
+        Returns list of (TYPE_SCRIPT, GlyphFTOutput, value) tuples that
+        can be passed directly to Transaction.from_io."""
+        from .glyph import GlyphFTOutput
+        # recipient must be a P2PKH Address.
+        recipient_pkh = recipient_address.hash160
+        outs = [
+            (TYPE_SCRIPT,
+             GlyphFTOutput.from_pkh_ref(recipient_pkh, target_ref),
+             amount_photons),
+        ]
+        if ft_change_photons > 0:
+            outs.append(
+                (TYPE_SCRIPT,
+                 GlyphFTOutput.from_pkh_ref(change_address.hash160, target_ref),
+                 ft_change_photons),
+            )
+        return outs
+
+    def _resolve_and_pick_fee_inputs(
+            self, ft_coins, ft_in_sum, n_ft_out, rxd_change_address,
+            fee_rate_sats_per_byte):
+        """Pick plain-RXD inputs to cover the fee; compute the fee via
+        a bounded fixed-point loop so adding an input to cover the fee
+        doesn't under-pay when that input itself adds marginal fee.
+
+        Returns (rxd_coins, rxd_change, fee, n_rxd_out). Raises
+        NotEnoughRxdForFtFee on total-insufficient or fragmented RXD.
+        """
+        from .glyph import estimate_ft_tx_size, NotEnoughRxdForFtFee
+
+        all_coins = self.get_utxos(exclude_frozen=True, mature=True,
+                                   confirmed_only=False, exclude_slp=True,
+                                   exclude_glyph=True)
+        rxd_coins = [c for c in all_coins if not c.get('glyph_kind')]
+        # Exclude coins already picked as FT inputs (paranoia — FT coins
+        # shouldn't be in exclude_glyph=True output, but check anyway).
+        ft_prevouts = {f'{c["prevout_hash"]}:{c["prevout_n"]}' for c in ft_coins}
+        rxd_coins = [
+            c for c in rxd_coins
+            if f'{c["prevout_hash"]}:{c["prevout_n"]}' not in ft_prevouts
+        ]
+        rxd_coins.sort(key=lambda c: c['value'], reverse=True)
+        total_rxd = sum(c['value'] for c in rxd_coins)
+
+        n_ft_in = len(ft_coins)
+        # FT inputs contribute their photons toward outputs, not fee.
+        # RXD inputs fund the fee + any RXD-change output.
+        picked_rxd = []
+        picked_sum = 0
+        n_rxd_in = 0
+        n_rxd_out = 0
+        fee = 0
+        rxd_change = 0
+
+        for _iter in range(4):  # typical wallets converge in 1-2 iters
+            size = estimate_ft_tx_size(n_ft_in, n_rxd_in, n_ft_out, n_rxd_out)
+            fee = size * fee_rate_sats_per_byte
+
+            # Re-select RXD inputs to cover fee (no contribution from FT
+            # inputs — their photons go to outputs).
+            picked_rxd = []
+            picked_sum = 0
+            for c in rxd_coins:
+                picked_rxd.append(c)
+                picked_sum += c['value']
+                if picked_sum >= fee:
+                    break
+
+            new_rxd_change = picked_sum - fee if picked_sum > fee else 0
+            new_n_rxd_in = len(picked_rxd)
+            new_n_rxd_out = 1 if new_rxd_change > 0 else 0
+            if new_n_rxd_in == n_rxd_in and new_n_rxd_out == n_rxd_out:
+                rxd_change = new_rxd_change
+                break
+            n_rxd_in = new_n_rxd_in
+            n_rxd_out = new_n_rxd_out
+        else:
+            # Didn't converge in 4 iters — report the correct failure mode.
+            if total_rxd < fee:
+                raise NotEnoughRxdForFtFee(
+                    f'insufficient RXD: have {total_rxd} photons, need '
+                    f'~{fee} for network fee at {fee_rate_sats_per_byte} sat/byte')
+            raise NotEnoughRxdForFtFee(
+                f'RXD inputs too fragmented to cover fee of {fee} sats '
+                f'at {fee_rate_sats_per_byte} sat/byte; total available '
+                f'{total_rxd} is sufficient but no chunk combination '
+                f'converges in 4 iterations',
+                fragmented=True)
+
+        if picked_sum < fee:
+            raise NotEnoughRxdForFtFee(
+                f'insufficient RXD: have {picked_sum} (selected), '
+                f'{total_rxd} (total), need {fee} for fee')
+        return picked_rxd, rxd_change, fee, n_rxd_out
+
+    def make_unsigned_ft_transaction(
+            self, target_ref, recipient_address, amount_photons,
+            config, fee_rate_sats_per_byte=None):
+        """Build an unsigned Radiant Glyph FT send transaction.
+
+        Returns a Transaction whose outputs and inputs satisfy the 7
+        invariants in electroncash.glyph.core.assert_ft_invariants.
+        Caller is responsible for wallet.sign_transaction(tx, password)
+        and broadcast (via network or testmempoolaccept first).
+
+        Arguments:
+          target_ref: 36-byte ref identifying the FT to send.
+          recipient_address: Address where the FT should be delivered.
+            Must be P2PKH (the Glyph FT template's prologue is P2PKH;
+            other address kinds can't spend Glyph UTXOs).
+          amount_photons: exact photon count to deliver (1 photon = 1 sat).
+          config: SimpleConfig; reserved for future dust/policy overrides.
+          fee_rate_sats_per_byte: defaults to FT_MIN_FEE_RATE (10000).
+
+        Raises:
+          SendFtError('dust_change') if FT change < 2M photons.
+          SendFtError('ref_mismatch') if no FT UTXOs match target_ref or
+            if photon conservation is violated.
+          GlyphRefMismatch if a cached ref tag disagrees with the raw
+            scriptPubKey bytes (invariant 7).
+          NotEnoughRxdForFtFee if RXD inputs can't cover the fee.
+        """
+        from .glyph import FT_MIN_FEE_RATE, assert_ft_invariants, SendFtError
+
+        if fee_rate_sats_per_byte is None:
+            fee_rate_sats_per_byte = FT_MIN_FEE_RATE
+        if len(target_ref) != 36:
+            raise SendFtError(
+                'invalid_ref',
+                f'target_ref must be 36 bytes, got {len(target_ref)}')
+        if recipient_address.kind != Address.ADDR_P2PKH:
+            raise SendFtError(
+                'invalid_recipient',
+                'recipient must be a P2PKH address; Glyph FT outputs use '
+                'a P2PKH-compatible prologue')
+        if amount_photons <= 0:
+            raise SendFtError(
+                'invalid_recipient',  # reusing enum; a fifth reason would be overkill for one call site
+                f'amount must be positive, got {amount_photons}')
+
+        target_ref_hex = target_ref.hex()
+
+        # 1. Pick FT inputs + determine FT change.
+        ft_coins, ft_change_photons = self._select_ft_inputs(
+            target_ref_hex, amount_photons)
+
+        # 2. Build FT outputs (recipient + optional change).
+        change_addrs = self.get_change_addresses()
+        if not change_addrs:
+            raise SendFtError(
+                'invalid_recipient', 'wallet has no change addresses')
+        ft_change_address = change_addrs[0]
+        ft_outputs = self._build_ft_outputs(
+            recipient_address, amount_photons, ft_change_address,
+            ft_change_photons, target_ref)
+
+        # 3. Pick RXD inputs for fee via bounded fixed-point loop.
+        rxd_change_address = change_addrs[1] if len(change_addrs) > 1 else ft_change_address
+        rxd_coins, rxd_change, fee, n_rxd_out = self._resolve_and_pick_fee_inputs(
+            ft_coins, ft_change_photons + amount_photons, len(ft_outputs),
+            rxd_change_address, fee_rate_sats_per_byte)
+
+        # 4. Build the RXD change output if any.
+        outputs = list(ft_outputs)
+        if rxd_change > 0:
+            outputs.append((TYPE_ADDRESS, rxd_change_address, rxd_change))
+
+        # 5. Populate txin shape for all coins (both FT and RXD).
+        #    add_input_info sets type, prev_scriptPubKey_hex, sig_info.
+        inputs = []
+        for c in ft_coins + rxd_coins:
+            txin = dict(c)  # copy so we don't mutate the cached coin
+            # Coin dicts from get_utxos don't have prevout_hash/prevout_n
+            # already at the right keys — they do. Good.
+            self.add_input_info(txin)
+            inputs.append(txin)
+
+        # 6. Enforce invariants 1-7 before constructing the tx.
+        assert_ft_invariants(inputs, outputs, target_ref)
+
+        # 7. Build the unsigned tx and run wallet finalization.
+        tx = Transaction.from_io(inputs, outputs)
+        self._finalize_unsigned_tx(tx)
+
+        # 8. Second-pass semantic preflight: re-run invariants on the
+        #    finalized tx (BIP_LI01 reordered inputs/outputs; make sure
+        #    no post-processing silently broke photon conservation).
+        assert_ft_invariants(tx.inputs(), tx.outputs(), target_ref)
+
         return tx
 
     def is_frozen(self, addr):
@@ -2293,9 +2590,33 @@ class Abstract_Wallet(PrintError, SPVDelegate):
             txin['type'] = self.get_txin_type(address)
             # Bitcoin Cash needs value to sign
             received, spent = self.get_addr_io(address)
-            item = received.get(txin['prevout_hash']+':%d'%txin['prevout_n'])
+            txo_key = txin['prevout_hash']+':%d'%txin['prevout_n']
+            item = received.get(txo_key)
             tx_height, value, is_cb = item
             txin['value'] = value
+            # Glyph-aware signing: if this coin is a classifier-recognized
+            # FT holder or NFT singleton, switch the txin type so
+            # get_preimage_script emits the full 75B/63B scriptPubKey
+            # (Radiant's sighash covers the whole thing — no cut at
+            # OP_STATESEPARATOR; see docs/research/2026-04-18-radiant-
+            # sighash-cutpoint.md). scriptSig format stays <sig><pubkey>,
+            # same as plain P2PKH.
+            glyph_kind = self.glyph.kind_for_txo(txo_key)
+            if glyph_kind in ('ft_holder', 'nft_singleton'):
+                txin['type'] = 'glyph_' + glyph_kind.split('_')[0]  # ft_holder -> glyph_ft, nft_singleton -> glyph_nft
+                # Populate prev_scriptPubKey_hex from the stored parent tx.
+                # This is the only source of truth for the full script —
+                # the txin's `address` carries only the 25B P2PKH prologue
+                # because the classifier mapped the output to TYPE_ADDRESS.
+                prev_spk_hex = self.glyph.prev_scriptpubkey_hex_for_txo(txo_key)
+                if prev_spk_hex is None:
+                    # Parent tx not in wallet store — can't sign safely.
+                    # Fall back to p2pkh type; signing will fail consensus
+                    # but the wallet won't crash.
+                    txin['type'] = 'p2pkh'
+                else:
+                    txin['prev_scriptPubKey_hex'] = prev_spk_hex
+                    txin['glyph_ref'] = self.glyph.ref_info_for_txo(txo_key)
             self.add_input_sig_info(txin, address)
 
     def can_sign(self, tx):
@@ -3022,7 +3343,11 @@ class ImportedPrivkeyWallet(ImportedWalletBase):
         return self.keystore.export_private_key(pubkey, password)
 
     def add_input_sig_info(self, txin, address):
-        assert txin['type'] == 'p2pkh'
+        # Glyph FT holder / NFT singleton inputs sign with the same
+        # scriptSig shape as plain P2PKH (<sig> <pubkey>). Only the
+        # preimage scriptCode differs (handled by get_preimage_script).
+        assert txin['type'] in ('p2pkh', 'glyph_ft', 'glyph_nft'), \
+            f"unsupported txin type for keystore signing: {txin['type']}"
         pubkey = self.keystore.address_to_pubkey(address)
         txin['num_sig'] = 1
         txin['x_pubkeys'] = [pubkey.to_ui_string()]
@@ -3154,7 +3479,11 @@ class RpaWallet(ImportedWalletBase):
         return bitcoin.serialize_privkey(pk, compressed, self.txin_type)
 
     def add_input_sig_info(self, txin, address):
-        assert txin['type'] == 'p2pkh'
+        # Glyph FT holder / NFT singleton inputs sign with the same
+        # scriptSig shape as plain P2PKH (<sig> <pubkey>). Only the
+        # preimage scriptCode differs (handled by get_preimage_script).
+        assert txin['type'] in ('p2pkh', 'glyph_ft', 'glyph_nft'), \
+            f"unsupported txin type for keystore signing: {txin['type']}"
         pubkey = self.keystore.address_to_pubkey(address)
         txin['num_sig'] = 1
         txin['x_pubkeys'] = [pubkey.to_ui_string()]

@@ -296,6 +296,235 @@ class TestTransaction(unittest.TestCase):
         self.assertEqual("", tx.outputs()[0][1].to_ui_string())
         self.assertEqual('50fa7bd4e5e2d3220fd2e84effec495b9845aba379d853408779d59a4b0b4f59', tx.txid())
 
+class TestRadiantPreimage(unittest.TestCase):
+    """Regression tests for Radiant's hashOutputHashes sighash extension.
+
+    The preimage plumbing has always emitted the 36-byte zero placeholder
+    for the per-output `totalRefs | refsHash` summary. PR A replaces those
+    zeros with real values when an output carries OP_PUSHINPUTREF /
+    OP_PUSHINPUTREFSINGLETON opcodes. This class asserts two things:
+
+      1. Non-Glyph outputs stay byte-identical to the pre-PR-A behaviour
+         (a plain P2PKH tx still signs/verifies the same way).
+      2. The mainnet golden vector below proves PR A's Glyph-output
+         summary matches what radiant-node computed: we reconstruct the
+         preimage, sha256d it, and verify the live mainnet signature on
+         vin[1] against the recovered msg_hash.
+    """
+
+    def test_non_glyph_output_preimage_bytes_identical(self):
+        """For a tx with only plain P2PKH outputs, PR A must emit exactly
+        72 zero hex chars (36 zero bytes) for the totalRefs|refsHash
+        region of each per-output summary — byte-identical to the
+        pre-PR-A plumbing."""
+        tx = transaction.Transaction(signed_blob)
+        tx.deserialize()
+        output = tx.outputs()[0]
+        # hashOutput summary = 8B value + 32B sha256d(spk) + 4B totalRefs + 32B refsHash
+        # = 76 bytes = 152 hex chars. The last 72 chars (36 bytes) should be all zeros.
+        summary_hex = tx.serialize_hash_output(output, 0)
+        self.assertEqual(len(summary_hex), 152)  # 76 bytes as hex
+        trailing = summary_hex[-72:]
+        self.assertEqual(
+            trailing, '0' * 72,
+            "Plain P2PKH output summary must emit totalRefs=0, refsHash=zero32; "
+            "changing this byte region breaks sighash for every non-Glyph output "
+            "in every Radiant tx.")
+
+    def test_glyph_output_emits_nonzero_refs(self):
+        """An output containing an OP_PUSHINPUTREF must emit totalRefs >= 1
+        and a non-zero refsHash in its per-output summary. Without this,
+        Glyph-output-bearing txs produce a preimage that doesn't match
+        what radiant-node computed, so their signatures fail consensus."""
+        # Mainnet 75B FT holder from block 421000 tx 8ab5cf40...e2ea92f vout[1].
+        ft_spk_hex = (
+            '76a914e9aa4adbe3a3f07887d67d9cedae324711f053ef88ac'
+            'bdd08b87c3c771b1a9f5015a4f26bfd80979ed196b5366257a6f30929646dfd943a4'
+            '00000000dec0e9aa76e378e4a269e69d'
+        )
+        ft_output_script = ScriptOutput(bytes.fromhex(ft_spk_hex))
+        tx = transaction.Transaction(signed_blob)  # any valid tx skeleton
+        tx.deserialize()
+        # Amount 50000 sats (matches the real mainnet output).
+        output = (TYPE_SCRIPT, ft_output_script, 50000)
+        summary_hex = tx.serialize_hash_output(output)
+        self.assertEqual(len(summary_hex), 152)
+        # totalRefs = 1 = 01000000 (u32 LE); refsHash = sha256d(36B ref).
+        total_refs_hex = summary_hex[80:88]  # bytes 40-43 of summary
+        refs_hash_hex = summary_hex[88:]     # bytes 44-75 of summary
+        self.assertEqual(total_refs_hex, '01000000',
+                         "Single OP_PUSHINPUTREF must emit totalRefs=1")
+        self.assertNotEqual(refs_hash_hex, '0' * 64,
+                            "Non-zero refs must produce non-zero refsHash")
+
+    def test_mainnet_signature_verifies_against_our_preimage(self):
+        """End-to-end consensus proof: the mainnet signature on vin[1] of
+        tx 8ab5cf40...e2ea92f (block 421000, 409+ confirmations) verifies
+        against the preimage our code constructs. If this test fails,
+        PR A has silently broken byte-for-byte parity with radiant-node.
+
+        This tx is exercised because it contains BOTH a 241-byte FT
+        mint-authority control script (vout[0], 2 pushrefs) AND a 75-byte
+        FT holder (vout[1], 1 pushref), so the per-output summary logic
+        is tested for the two main non-standard script shapes at once.
+        """
+        import hashlib
+        from ..bitcoin import Hash
+
+        # Mainnet tx 8ab5cf40042672d5bd9e5c07bf79be43de0132eb3820cc05e09f91d61e2ea92f.
+        # Sourced from `radiant-cli getrawtransaction <txid>`.
+        tx_hex = (
+            '010000000252a2599fa0bd06be4da32384f07b5290d0f7610c97ec8b50588d944ed705ee09'
+            '0000000048040788272b20d5c54ac96cec7c3541326718de8f98290e1d9d8c7a0f202e6a3'
+            '43c9d04692a0b20482618dc0ae4925a89008fdcabf36a1c7317f0e35cafa9c75de4b746c0'
+            '60bd5500ffffffff370f6fb0a922ec8e0e0bf8c4704159353f99d09c6626aa985bc8a02c7'
+            '5a56804030000006a47'
+            '30440220'
+            '3f0ac17c0b05b51de72ac42996a303a223cd82592ec901f9c33efdd654182421'
+            '02207f72786ff4da19713ba4b83960c39beb4e4713745f37a8b24ee8457cd668eecc4121'
+            '02bc29a508a307b6a3d7da38dfb84cd9b7fb5b2ad36044ab5cf80429c4f1b8b17a'
+            'ffffffff04'
+            '0100000000000000f1'
+            '04bcd00000d88b87c3c771b1a9f5015a4f26bfd80979ed196b5366257a6f30929646dfd9'
+            '43a408000000d08b87c3c771b1a9f5015a4f26bfd80979ed196b5366257a6f30929646df'
+            'd943a400000000036889090350c3000874da40a70d74da00bd5175c0c855797ea859795'
+            '9797ea87e5a7a7eaabc01147f77587f040000000088817600a269a269577ae500a06956'
+            '7ae600a06901d053797e0cdec0e9aa76e378e4a269e69d7eaa76e47b9d547a818b76537'
+            'a9c537ade789181547ae6939d635279cd01d853797e016a7e886778de519d547854807e'
+            'c0eb557f777e5379ec78885379eac0e9885379cc519d75686d7551'
+            '50c30000000000004b'
+            '76a914e9aa4adbe3a3f07887d67d9cedae324711f053ef88ac'
+            'bdd08b87c3c771b1a9f5015a4f26bfd80979ed196b5366257a6f30929646dfd943a40000'
+            '0000dec0e9aa76e378e4a269e69d'
+            '000000000000000015'
+            '6a036d73670f3330373020f09f8c9e205b7236785d'
+            '8445861f0400000019'
+            '76a9148dd3483e21c8d1abf199230d6854580e4b2fbbd288ac'
+            '00000000'
+        )
+        tx = transaction.Transaction(tx_hex)
+        tx.deserialize()
+        # Populate per-input fields required by serialize_preimage.
+        # vin[0] spends a 241B FT control; mark it 'unknown' since it's not
+        # what we're verifying. vin[1] is the plain P2PKH we check.
+        vin1_prev_pkh = bytes.fromhex('8dd3483e21c8d1abf199230d6854580e4b2fbbd2')
+        inputs = tx.inputs()
+        inputs[0]['value'] = 1
+        inputs[0]['type'] = 'unknown'
+        inputs[0]['address'] = None
+        inputs[1]['value'] = 17715837000
+        inputs[1]['type'] = 'p2pkh'
+        inputs[1]['address'] = Address.from_P2PKH_hash(vin1_prev_pkh)
+
+        preimage = bytes.fromhex(tx.serialize_preimage(1))
+        msg_hash = Hash(preimage)
+
+        # Verify the recorded signature against our computed msg_hash.
+        # If it verifies, PR A's preimage is byte-identical to
+        # radiant-node's.
+        import ecdsa
+        from ecdsa.util import sigdecode_der
+        pk_hex = '02bc29a508a307b6a3d7da38dfb84cd9b7fb5b2ad36044ab5cf80429c4f1b8b17a'
+        sig_der = bytes.fromhex(
+            '304402203f0ac17c0b05b51de72ac42996a303a223cd82592ec901f9c33efdd6541824'
+            '2102207f72786ff4da19713ba4b83960c39beb4e4713745f37a8b24ee8457cd668eecc'
+        )
+        vk = ecdsa.VerifyingKey.from_string(
+            bytes.fromhex(pk_hex),
+            curve=ecdsa.SECP256k1,
+            hashfunc=hashlib.sha256,
+        )
+        try:
+            vk.verify_digest(sig_der, msg_hash, sigdecode=sigdecode_der)
+        except ecdsa.BadSignatureError:
+            self.fail(
+                "Mainnet signature on tx 8ab5cf40...e2ea92f vin[1] failed to "
+                "verify against our preimage. PR A has broken byte-for-byte "
+                "parity with radiant-node's hashOutputHashes computation.")
+
+
+class TestGlyphInputPreimageScript(unittest.TestCase):
+    """PR B: get_preimage_script dispatches on txin['type'] and returns
+    the full 75B FT / 63B NFT script for Glyph inputs.
+
+    The existing `p2pkh` branch returns the 25B P2PKH script from
+    txin['address'].to_script(). For Glyph inputs we need the FULL
+    original scriptPubKey (sighash covers everything; no cut at
+    OP_STATESEPARATOR). The full script lives on the txin as
+    `prev_scriptPubKey_hex`, populated by add_input_info from the
+    wallet's stored parent tx."""
+
+    def test_p2pkh_returns_25B_P2PKH(self):
+        """Baseline regression: plain P2PKH inputs still return the
+        25-byte script from the address."""
+        addr = Address.from_P2PKH_hash(bytes.fromhex('8dd3483e21c8d1abf199230d6854580e4b2fbbd2'))
+        txin = {'type': 'p2pkh', 'address': addr}
+        result = transaction.Transaction.get_preimage_script(txin)
+        self.assertEqual(result, '76a9148dd3483e21c8d1abf199230d6854580e4b2fbbd288ac')
+        self.assertEqual(len(result) // 2, 25)
+
+    def test_glyph_ft_returns_full_75B_script(self):
+        """FT holder inputs return the full 75-byte template."""
+        ft_spk_hex = (
+            '76a914e9aa4adbe3a3f07887d67d9cedae324711f053ef88ac'
+            'bdd08b87c3c771b1a9f5015a4f26bfd80979ed196b5366257a6f30929646dfd943a4'
+            '00000000dec0e9aa76e378e4a269e69d'
+        )
+        self.assertEqual(len(ft_spk_hex) // 2, 75)
+        txin = {'type': 'glyph_ft', 'prev_scriptPubKey_hex': ft_spk_hex}
+        result = transaction.Transaction.get_preimage_script(txin)
+        self.assertEqual(result, ft_spk_hex)
+
+    def test_glyph_nft_returns_full_63B_script(self):
+        """NFT singleton inputs return the full 63-byte template."""
+        nft_spk_hex = (
+            'd808480623910ba219a0903afa9f10140c31c30f0529d51f860401cb79caf24ed0000000007576a914a9763e88160a63a3f03bf846268ed0fb8abd8b5588ac'
+        )
+        self.assertEqual(len(nft_spk_hex) // 2, 63)
+        txin = {'type': 'glyph_nft', 'prev_scriptPubKey_hex': nft_spk_hex}
+        result = transaction.Transaction.get_preimage_script(txin)
+        self.assertEqual(result, nft_spk_hex)
+
+    def test_glyph_ft_missing_prev_scriptpubkey_raises(self):
+        """Defensive: a Glyph txin that somehow lost its
+        prev_scriptPubKey_hex (buggy caller) must fail loudly at
+        preimage assembly, not silently emit an empty script."""
+        txin = {'type': 'glyph_ft'}  # no prev_scriptPubKey_hex
+        with self.assertRaises(KeyError):
+            transaction.Transaction.get_preimage_script(txin)
+
+
+class TestGlyphInputScriptSigShape(unittest.TestCase):
+    """PR B: input_script (scriptSig construction) treats glyph_ft and
+    glyph_nft the same as p2pkh — <sig> <pubkey>. Radiant's sighash
+    preimage differs for these types (full script, not 25B P2PKH) but
+    the scriptSig form is identical."""
+
+    def test_glyph_ft_scriptsig_is_sig_plus_pubkey(self):
+        """Estimated scriptSig for glyph_ft has the same shape as p2pkh:
+        a signature push followed by a pubkey push. No redeem script or
+        multisig wrapping."""
+        addr = Address.from_P2PKH_hash(bytes.fromhex('8dd3483e21c8d1abf199230d6854580e4b2fbbd2'))
+        txin_ft = {
+            'type': 'glyph_ft',
+            'address': addr,
+            'num_sig': 1,
+            'signatures': [None],
+            'x_pubkeys': ['02' + '00' * 32],
+        }
+        txin_p2pkh = {
+            'type': 'p2pkh',
+            'address': addr,
+            'num_sig': 1,
+            'signatures': [None],
+            'x_pubkeys': ['02' + '00' * 32],
+        }
+        # Estimated sizes must match — same scriptSig shape.
+        ft_script = transaction.Transaction.input_script(txin_ft, estimate_size=True)
+        p2pkh_script = transaction.Transaction.input_script(txin_p2pkh, estimate_size=True)
+        self.assertEqual(len(ft_script), len(p2pkh_script))
+
+
 class NetworkMock(object):
 
     def __init__(self, unspent):

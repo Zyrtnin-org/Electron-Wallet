@@ -26,8 +26,6 @@
 # via OP_CODESCRIPTHASHVALUESUM_UTXOS / _OUTPUTS. Spending an FT holder
 # requires the same scriptSig as plain P2PKH: <sig> <pubkey>.
 
-from .util import PrintError
-
 # Radiant-specific opcodes for UTXO references
 OP_PUSHINPUTREF = 0xd0
 OP_REQUIREINPUTREF = 0xd1
@@ -36,7 +34,8 @@ OP_PUSHINPUTREFSINGLETON = 0xd8
 OP_STATESEPARATOR = 0xbd
 OP_DROP = 0x75
 
-# Reference data size: 32-byte txid + 4-byte output index
+# Reference data size: 32-byte txid + 4-byte output index = 36 bytes total.
+# See ref encoding notes in core.py.
 REF_DATA_SIZE = 36
 
 # Opcodes that take a 36-byte reference argument. Includes both OP_PUSHINPUTREF
@@ -133,114 +132,75 @@ def extract_ref_id(script_bytes):
     return bytes(script_bytes[1:1 + REF_DATA_SIZE])
 
 
-class WalletData(PrintError):
-    """Tracks Glyph reference UTXOs in the wallet to prevent accidental
-    spending. Mirrors the pattern used by slp.WalletData but much simpler
-    since we only need to track which UTXOs have references, not parse
-    full token semantics."""
+def extract_all_pushrefs(script_bytes):
+    """Walk a script and collect every OP_PUSHINPUTREF (0xd0) and
+    OP_PUSHINPUTREFSINGLETON (0xd8) argument. Returns a list of raw
+    36-byte refs in the order they appear in the script (caller must
+    sort/dedupe if they need the canonical set ordering used by Radiant's
+    `GetPushRefs` / `hashOutputHashes` summary).
 
-    def __init__(self, wallet):
-        self.wallet = wallet
-        # Set of txo strings ("txid:n") that have Radiant reference scripts
-        self.ref_txos = set()
-        # Maps txo string → first reference ID bytes (for display)
-        self.ref_ids = {}
-        self.need_rebuild = False
+    Mirrors radiant-node's GetPushRefs (src/script/script.cpp:549):
+    OP_PUSHINPUTREFSINGLETON (0xd8) refs are inserted into the same
+    pushRefSet as OP_PUSHINPUTREF (0xd0) refs, so both kinds contribute
+    to the per-output refs hash.
 
-    def diagnostic_name(self):
-        return f'{type(self).__name__}/{self.wallet.diagnostic_name()}'
+    This is the general-purpose ref walker used by the sighash per-output
+    summary in `transaction.py::serialize_hash_output`. It handles any
+    script shape — 63B NFT singleton, 75B FT holder, 241B FT control,
+    dMint containers — not just the two classifier templates.
 
-    def clear(self):
-        self.ref_txos.clear()
-        self.ref_ids.clear()
-
-    def is_glyph_ref(self, txo):
-        """Returns True if the given txo (string 'txid:n') is a Glyph
-        reference UTXO that should not be spent."""
-        return txo in self.ref_txos
-
-    def ref_info_for_txo(self, txo):
-        """Returns the reference ID hex for the given txo, or None."""
-        ref_id = self.ref_ids.get(txo)
-        if ref_id is not None:
-            return ref_id.hex()
-        return None
-
-    def add_tx(self, tx_hash, tx):
-        """Scan a transaction for Glyph reference outputs and track them.
-        Called by wallet.add_transaction with lock held.
-
-        Handles two shapes:
-          1. Ref-prefixed scripts (NFT singletons + older ref-prefix variants)
-             detected via has_radiant_refs() at the start of the script.
-          2. FT holders (75B, P2PKH prologue + glyph epilogue) — these do
-             NOT start with a ref opcode. classify_glyph_output() exact-
-             matches the 75-byte template and returns the embedded ref.
-        """
-        for n, (typ, addr, value) in enumerate(tx.outputs()):
-            raw_script = tx.output_script(n)
-            if not raw_script:
-                continue
-            # Precise classifier first: covers NFT singletons (63B) and
-            # FT holders (75B). Returns the canonical 36-byte ref for
-            # balance grouping.
-            gm = classify_glyph_output(raw_script)
-            if gm is not None:
-                _kind, _pkh, ref_bytes = gm
-                txo = f"{tx_hash}:{n}"
-                self.ref_txos.add(txo)
-                if ref_bytes is not None:
-                    self.ref_ids[txo] = ref_bytes
-                continue
-            # Fall back to loose prefix detection for shapes the precise
-            # classifier doesn't recognize (241B FT control, dMint, etc).
-            if has_radiant_refs(raw_script):
-                txo = f"{tx_hash}:{n}"
-                self.ref_txos.add(txo)
-                ref_id = extract_ref_id(raw_script)
-                if ref_id is not None:
-                    self.ref_ids[txo] = ref_id
-
-    def rm_tx(self, tx_hash):
-        """Remove tracking for a transaction. Called by
-        wallet.remove_transaction with lock held."""
-        to_remove = [txo for txo in self.ref_txos
-                     if txo.rsplit(':', 1)[0] == tx_hash]
-        for txo in to_remove:
-            self.ref_txos.discard(txo)
-            self.ref_ids.pop(txo, None)
-
-    def load(self):
-        """Load persisted glyph data from wallet storage."""
-        data = self.wallet.storage.get('glyph_ref_txos')
-        if isinstance(data, list):
-            self.ref_txos = set(data)
-        data = self.wallet.storage.get('glyph_ref_ids')
-        if isinstance(data, dict):
-            self.ref_ids = {k: bytes.fromhex(v) for k, v in data.items()
-                           if isinstance(v, str)}
+    OP_DROP, OP_REQUIREINPUTREF, OP_DISALLOWPUSHINPUTREF, and standard
+    push opcodes are stepped over but not collected (matches the C++
+    `pushRefSet` semantics — require/disallow refs go into their own
+    sets, not pushRefSet). Malformed scripts (truncated ref, unknown
+    opcode with bad layout) silently stop iteration at the fault point.
+    """
+    refs = []
+    i = 0
+    n = len(script_bytes)
+    while i < n:
+        op = script_bytes[i]
+        if op == OP_PUSHINPUTREF or op == OP_PUSHINPUTREFSINGLETON:
+            if i + 1 + REF_DATA_SIZE > n:
+                break  # truncated — stop here
+            refs.append(bytes(script_bytes[i + 1:i + 1 + REF_DATA_SIZE]))
+            i += 1 + REF_DATA_SIZE
+        elif op == OP_REQUIREINPUTREF:
+            # Has a 36B arg but does NOT contribute to pushRefSet.
+            if i + 1 + REF_DATA_SIZE > n:
+                break
+            i += 1 + REF_DATA_SIZE
+        elif op == OP_DISALLOWPUSHINPUTREF:
+            i += 1  # single-byte marker
+        elif 1 <= op <= 75:
+            # Standard push of `op` bytes.
+            i += 1 + op
+        elif op == 0x4c:  # OP_PUSHDATA1
+            if i + 2 > n:
+                break
+            plen = script_bytes[i + 1]
+            i += 2 + plen
+        elif op == 0x4d:  # OP_PUSHDATA2
+            if i + 3 > n:
+                break
+            plen = int.from_bytes(script_bytes[i + 1:i + 3], 'little')
+            i += 3 + plen
+        elif op == 0x4e:  # OP_PUSHDATA4
+            if i + 5 > n:
+                break
+            plen = int.from_bytes(script_bytes[i + 1:i + 5], 'little')
+            i += 5 + plen
         else:
-            self.need_rebuild = True
-
-    def save(self):
-        """Persist glyph data to wallet storage."""
-        self.wallet.storage.put('glyph_ref_txos', list(self.ref_txos))
-        self.wallet.storage.put('glyph_ref_ids',
-                                {k: v.hex() for k, v in self.ref_ids.items()})
-
-    def rebuild(self):
-        """Rebuild glyph data from wallet transactions."""
-        self.clear()
-        for tx_hash, tx in self.wallet.transactions.items():
-            self.add_tx(tx_hash, tx)
-        self.need_rebuild = False
+            # All non-push opcodes are single-byte in Bitcoin's script.
+            i += 1
+    return refs
 
 
 # ---------------------------------------------------------------------------
-# Precise shape classifier — added 2026-04.
+# Precise shape classifier.
 #
 # Recognizes the three mainnet-observed spendable shapes with exact byte
-# matching (not just prefix detection). Backed by 24 golden vectors in
+# matching (not just prefix detection). Backed by 14 golden vectors in
 # tests/test_glyph_classifier.py. The port target from the JavaScript
 # reference is radiant-ledger-app/view-only-ui/classifier.mjs.
 # ---------------------------------------------------------------------------

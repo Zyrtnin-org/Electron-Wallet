@@ -662,7 +662,13 @@ class Transaction:
             script = '00' + script
             redeem_script = multisig_script(pubkeys, txin['num_sig'])
             script += push_script(redeem_script)
-        elif _type == 'p2pkh':
+        elif _type in ('p2pkh', 'glyph_ft', 'glyph_nft'):
+            # Glyph FT holders and NFT singletons use the same scriptSig
+            # form as plain P2PKH: <sig> <pubkey>. The Glyph-specific
+            # tail (OP_STATESEPARATOR / OP_PUSHINPUTREF + ref + epilogue)
+            # only affects the sighash preimage (see get_preimage_script),
+            # NOT the scriptSig format. Confirmed via Pinball's
+            # production transfer_nft.js and radiant-node source.
             script += push_script(pubkeys[0])
         elif _type == 'unknown':
             raise RuntimeError('Cannot serialize unknown input with missing scriptSig')
@@ -685,6 +691,17 @@ class Transaction:
         _type = txin['type']
         if _type == 'p2pkh':
             return txin['address'].to_script().hex()
+        elif _type in ('glyph_ft', 'glyph_nft'):
+            # Radiant's sighash preimage for Glyph inputs covers the FULL
+            # original scriptPubKey — the 75B FT holder template or the
+            # 63B NFT singleton template — NOT the 25B P2PKH prologue
+            # alone. Verified at radiant-node/src/script/interpreter.cpp
+            # :2645 (SignatureHash serializes scriptCode verbatim; no cut
+            # at OP_STATESEPARATOR). The wallet populates
+            # `prev_scriptPubKey_hex` on the txin during add_input_info
+            # from the already-scanned coin data (no extra RPC needed
+            # since we classified the output when the UTXO first appeared).
+            return txin['prev_scriptPubKey_hex']
         elif _type == 'p2sh':
             pubkeys, x_pubkeys = self.get_sorted_pubkeys(txin)
             return multisig_script(pubkeys, txin['num_sig'])
@@ -721,19 +738,85 @@ class Transaction:
         self._inputs.sort(key = lambda i: (i['prevout_hash'], i['prevout_n']))
         self._outputs.sort(key = lambda o: (o[2], self.pay_script(o[1])))
 
-    def serialize_output(self, output):
+    def _output_script_hex(self, output, index=None):
+        """Return the scriptPubKey hex for an output, preferring the raw
+        bytes from `_output_scripts` when available (deserialized tx)
+        and falling back to `addr.to_script()` (newly-built tx).
+
+        This matters for Radiant Glyph outputs: when a tx is read from
+        the network, `get_address_from_output_script` classifies FT
+        holder (75B) / NFT singleton (63B) outputs as TYPE_ADDRESS with
+        an Address that only emits the 25B P2PKH prologue on to_script().
+        For sighash correctness we must feed the FULL original script
+        (including the OP_PUSHINPUTREF tail) into the per-output summary
+        and the serialized output. Using _output_scripts preserves the
+        original bytes; using addr.to_script() would silently strip the
+        Glyph epilogue.
+
+        Newly-built txs (where the caller supplies outputs directly and
+        _output_scripts is None) must pass a GlyphFTOutput / ScriptOutput
+        subclass as `addr` so addr.to_script() returns the full script.
+        """
+        if index is not None:
+            raw = self.output_script(index)
+            if raw is not None:
+                return raw.hex()
+        output_type, addr, amount = output
+        return addr.to_script().hex()
+
+    def serialize_output(self, output, index=None):
         output_type, addr, amount = output
         s = int_to_hex(amount, 8)
-        script = self.pay_script(addr)
+        script = self._output_script_hex(output, index)
         s += var_int(len(script)//2)
         s += script
         return s
 
-    def serialize_hash_output(self, output):
+    def serialize_hash_output(self, output, index=None):
+        """Per-output summary consumed by Radiant's hashOutputHashes
+        field (sighash preimage position between nSequence and
+        hashOutputs). Layout — 76 bytes:
+
+            nValue             (8B LE)
+            sha256d(spk)       (32B)     # scriptPubKeyHash
+            totalRefs          (4B LE)   # count of OP_PUSHINPUTREF refs
+            refsHash           (32B)     # sha256d of sorted-deduped
+                                         # concatenated refs, or zero
+                                         # if totalRefs == 0
+
+        Verified against radiant-node/src/primitives/transaction.h
+        (writeOutputDataSummaryVector / getRefHashDataSummary).
+
+        For plain outputs (non-Glyph) this emits totalRefs=0 and
+        refsHash=zero32, byte-identical to the pre-PR-A behaviour.
+
+        For outputs whose scriptPubKey contains one or more
+        OP_PUSHINPUTREF (0xd0) or OP_PUSHINPUTREFSINGLETON (0xd8)
+        opcodes — FT holders, NFT singletons, FT mint-authority control
+        scripts, dMint containers — this emits the real totalRefs and a
+        real refsHash computed over the sorted-deduped 36-byte refs.
+
+        Both push-ref kinds contribute to pushRefSet; matches C++
+        GetPushRefs (script.cpp:598)."""
         output_type, addr, amount = output
         s = int_to_hex(amount, 8)
-        s += bh2u(Hash(addr.to_script()))
-        s += "000000000000000000000000000000000000000000000000000000000000000000000000"
+        spk_bytes = bytes.fromhex(self._output_script_hex(output, index))
+        s += bh2u(Hash(spk_bytes))
+        # Emit totalRefs | refsHash (36 bytes). See docstring for layout.
+        refs = glyph_mod.extract_all_pushrefs(spk_bytes)
+        if refs:
+            # std::set<uint288> sort order: MSB-first reverse of each ref's
+            # little-endian bytes (uint256.h::Compare comment at line 47).
+            # Equivalent to sorting by the reversed byte sequence.
+            sorted_refs = sorted(set(refs), key=lambda r: r[::-1])
+            # refsHash = sha256d of concatenated refs (CHashWriter is
+            # double-sha256 via CHash256; see hash.h line 131).
+            refs_hash = Hash(b''.join(sorted_refs))
+            s += int_to_hex(len(sorted_refs), 4)
+            s += bh2u(refs_hash)
+        else:
+            # 4B totalRefs=0 + 32B refsHash=zero == 36 bytes of zero.
+            s += "000000000000000000000000000000000000000000000000000000000000000000000000"
         return s
 
     @classmethod
@@ -786,8 +869,11 @@ class Transaction:
 
         hashPrevouts = Hash(bfh(''.join(self.serialize_outpoint(txin) for txin in inputs)))
         hashSequence = Hash(bfh(''.join(int_to_hex(txin.get('sequence', 0xffffffff - 1), 4) for txin in inputs)))
-        hashOutputHashes = Hash(bfh(''.join(self.serialize_hash_output(o) for o in outputs)))
-        hashOutputs = Hash(bfh(''.join(self.serialize_output(o) for o in outputs)))
+        # Pass index so serialize_{hash_,}output can look up _output_scripts
+        # for deserialized txs where the original scriptPubKey bytes are
+        # preserved (critical for Glyph outputs; see _output_script_hex).
+        hashOutputHashes = Hash(bfh(''.join(self.serialize_hash_output(o, i) for i, o in enumerate(outputs))))
+        hashOutputs = Hash(bfh(''.join(self.serialize_output(o, i) for i, o in enumerate(outputs))))
 
         res = hashPrevouts, hashSequence, hashOutputHashes, hashOutputs
         # cach resulting value, along with some minimal metadata to defensively
@@ -851,7 +937,7 @@ class Transaction:
         inputs = self.inputs()
         outputs = self.outputs()
         txins = var_int(len(inputs)) + ''.join(self.serialize_input(txin, self.input_script(txin, estimate_size, self._sign_schnorr), estimate_size) for txin in inputs)
-        txouts = var_int(len(outputs)) + ''.join(self.serialize_output(o) for o in outputs)
+        txouts = var_int(len(outputs)) + ''.join(self.serialize_output(o, i) for i, o in enumerate(outputs))
         return nVersion + txins + txouts + nLocktime
 
     def hash(self):

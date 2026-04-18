@@ -50,6 +50,7 @@ class UTXOList(MyTreeWidget):
         address      = Qt.UserRole + 2
         cash_account = Qt.UserRole + 3  # this may not always be there for a particular item
         slp_token    = Qt.UserRole + 4  # this is either a tuple of (token_id, qty) or None
+        glyph_token  = Qt.UserRole + 5  # (kind, ref_hex) tuple or None (Radiant Glyph FT/NFT)
 
     filter_columns = [Col.address, Col.label]
     default_sort = MyTreeWidget.SortSpec(Col.amount, Qt.DescendingOrder)  # sort by amount, descending
@@ -70,6 +71,7 @@ class UTXOList(MyTreeWidget):
         self.blue = ColorScheme.BLUE.as_color(True)
         self.cyanBlue = QColor('#3399ff')
         self.slpBG = ColorScheme.SLPGREEN.as_color(True)
+        self.glyphBG = ColorScheme.GLYPHBG.as_color(True)
         self.immatureColor = ColorScheme.BLUE.as_color(False)
         self.output_point_prefix_text = columns[self.Col.output_point]
 
@@ -154,6 +156,9 @@ class UTXOList(MyTreeWidget):
             c_frozen = x['is_frozen_coin']
             toolTipMisc = ''
             slp_token = x['slp_token']
+            glyph_kind = x.get('glyph_kind')
+            glyph_ref = x.get('glyph_ref')
+            glyph_token = (glyph_kind, glyph_ref) if glyph_kind else None
             if is_immature:
                 for colNum in range(self.columnCount()):
                     if colNum == self.Col.label:
@@ -163,6 +168,16 @@ class UTXOList(MyTreeWidget):
             elif slp_token:
                 utxo_item.setBackground(0, self.slpBG)
                 toolTipMisc = _('Coin contains an SLP token')
+            elif glyph_token:
+                # Radiant Glyph FT holder or NFT singleton. Color the row
+                # and show a tooltip identifying the ref so users can see
+                # at a glance which UTXOs are token-bearing.
+                utxo_item.setBackground(0, self.glyphBG)
+                kind_label = (_('Glyph FT') if glyph_kind == 'ft_holder'
+                              else _('Glyph NFT'))
+                ref_short = glyph_ref[:10] + '…' if glyph_ref else '?'
+                toolTipMisc = _('Coin contains a {kind} (ref {ref})').format(
+                    kind=kind_label, ref=ref_short)
             elif a_frozen and not c_frozen:
                 # address is frozen, coin is not frozen
                 # emulate the "Look" off the address_list .py's frozen entry
@@ -186,6 +201,9 @@ class UTXOList(MyTreeWidget):
                 utxo_item.setData(0, self.DataRoles.cash_account, ca_info)
             # store the slp_token
             utxo_item.setData(0, self.DataRoles.slp_token, slp_token)
+            # store the glyph_token so create_menu and filter logic can
+            # retrieve it without re-reading the coin dict
+            utxo_item.setData(0, self.DataRoles.glyph_token, glyph_token)
             if toolTipMisc:
                 utxo_item.setToolTip(0, toolTipMisc)
             run_hook("utxo_list_item_setup", self, utxo_item, x, name)
