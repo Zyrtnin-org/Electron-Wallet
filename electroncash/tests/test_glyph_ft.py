@@ -319,11 +319,13 @@ class EstimateFtTxSizeTests(unittest.TestCase):
 
     def test_typical_2_in_3_out_ft_send(self):
         # 1 FT input + 1 RXD fee input, 1 FT recipient + 1 FT change +
-        # 1 RXD change = 10 + 148*2 + 75*2 + 34*1 = 490 bytes.
+        # 1 RXD change = 10 + 148*2 + 84*2 + 34*1 = 508 bytes.
+        # Mainnet-verified: matches actual serialized size byte-for-byte
+        # on tx 0df26680...1cbd6db3.
         self.assertEqual(
             glyph.estimate_ft_tx_size(
                 n_ft_in=1, n_rxd_in=1, n_ft_out=2, n_rxd_out=1),
-            10 + 148 * 2 + 75 * 2 + 34,
+            10 + 148 * 2 + 84 * 2 + 34,
         )
 
     def test_full_balance_send_no_ft_change(self):
@@ -331,7 +333,7 @@ class EstimateFtTxSizeTests(unittest.TestCase):
         self.assertEqual(
             glyph.estimate_ft_tx_size(
                 n_ft_in=1, n_rxd_in=1, n_ft_out=1, n_rxd_out=1),
-            10 + 148 * 2 + 75 + 34,
+            10 + 148 * 2 + 84 + 34,
         )
 
     def test_no_rxd_change_case(self):
@@ -339,7 +341,7 @@ class EstimateFtTxSizeTests(unittest.TestCase):
         self.assertEqual(
             glyph.estimate_ft_tx_size(
                 n_ft_in=1, n_rxd_in=1, n_ft_out=2, n_rxd_out=0),
-            10 + 148 * 2 + 75 * 2,
+            10 + 148 * 2 + 84 * 2,
         )
 
 

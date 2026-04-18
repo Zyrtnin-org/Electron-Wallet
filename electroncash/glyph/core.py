@@ -245,15 +245,19 @@ def estimate_ft_tx_size(
              n_rxd_in)     = input wire size (32B prev_txid + 4B vout +
                              1B scriptsig_len + ~107B scriptsig +
                              4B sequence = 148B typical for P2PKH spend)
-      75  * n_ft_out       = FT holder output (75B script + 8B value +
-                             1B script_len; we round up to 84B but the
-                             input dominates so 75 is conservative-close)
+      84  * n_ft_out       = FT holder output wire size (75B script +
+                             8B value + 1B script_len varint)
       34  * n_rxd_out      = P2PKH output (25B script + 8B value + 1B len)
+
+    Mainnet-verified against a 508-byte (1 FT in + 1 RXD in, 2 FT out +
+    1 RXD out) tx: formula yields 508B, matching actual serialized size
+    byte-for-byte. Under-estimating this caused "min relay fee not met"
+    rejections at 10k sat/byte.
     """
     return (
         10
         + 148 * (n_ft_in + n_rxd_in)
-        + 75 * n_ft_out
+        + 84 * n_ft_out
         + 34 * n_rxd_out
     )
 
