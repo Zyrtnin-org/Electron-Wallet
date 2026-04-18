@@ -343,16 +343,6 @@ class EstimateFtTxSizeTests(unittest.TestCase):
         )
 
 
-class AssertFtInvariantsStubTests(unittest.TestCase):
-    """PR C lands the symbol; body is implemented in PR D. Confirm the
-    stub raises NotImplementedError so downstream PRs can't accidentally
-    ship while thinking invariants are enforced."""
-
-    def test_stub_raises_not_implemented(self):
-        with self.assertRaises(NotImplementedError):
-            glyph.assert_ft_invariants([], [], b'\x00' * 36)
-
-
 class ExtractAllPushrefsTests(unittest.TestCase):
     """extract_all_pushrefs walks any script and collects every
     OP_PUSHINPUTREF + OP_PUSHINPUTREFSINGLETON argument. Used by
@@ -422,6 +412,159 @@ class ExtractAllPushrefsTests(unittest.TestCase):
 
     def test_empty_script_returns_no_refs(self):
         self.assertEqual(glyph.extract_all_pushrefs(b''), [])
+
+
+class AssertFtInvariantsTests(unittest.TestCase):
+    """PR D: assert_ft_invariants enforces 7 invariants before signing.
+    Every violation raises (never asserts) so python -O doesn't strip
+    the check."""
+
+    # Two distinct refs for the multi-ref tests.
+    REF_A = bytes.fromhex(
+        '8b87c3c771b1a9f5015a4f26bfd80979ed196b5366257a6f30929646dfd943a400000000')
+    REF_B = bytes.fromhex(
+        '4bbba9407337be1465de8182dd88f5fb82355dd94e6acb45b1bc5e6f826aee4c00000000')
+
+    PKH_A = bytes.fromhex('32e092994ebdf8db0861b0e9208878c4221c4721')
+    PKH_B = bytes.fromhex('a434fbfe62e6cda47168f0ce4db4edb3c1b808e9')
+    PKH_C = bytes.fromhex('6fdc2880d5afbefcdbc89b31850414beec7d56bd')
+
+    def _ft_input(self, pkh, ref, value):
+        """Build a valid FT txin dict."""
+        from .. import glyph
+        spk = glyph.GlyphFTOutput.from_pkh_ref(pkh, ref).script
+        return {
+            'glyph_kind': 'ft_holder',
+            'glyph_ref': ref.hex(),
+            'prev_scriptPubKey_hex': spk.hex(),
+            'value': value,
+        }
+
+    def _ft_output(self, pkh, ref, value):
+        """Build a valid FT output tuple."""
+        from .. import glyph
+        from ..bitcoin import TYPE_SCRIPT
+        return (TYPE_SCRIPT, glyph.GlyphFTOutput.from_pkh_ref(pkh, ref), value)
+
+    def test_full_balance_send_passes(self):
+        """1 FT input of 3M photons, 1 FT recipient output of 3M, no
+        change. All invariants satisfied."""
+        txin = self._ft_input(self.PKH_A, self.REF_A, 3_000_000)
+        out = self._ft_output(self.PKH_B, self.REF_A, 3_000_000)
+        glyph.assert_ft_invariants([txin], [out], self.REF_A)  # must not raise
+
+    def test_partial_send_with_change_above_dust_passes(self):
+        """Send 2M of 5M; 3M change."""
+        txin = self._ft_input(self.PKH_A, self.REF_A, 5_000_000)
+        outs = [
+            self._ft_output(self.PKH_B, self.REF_A, 2_000_000),
+            self._ft_output(self.PKH_A, self.REF_A, 3_000_000),  # change
+        ]
+        glyph.assert_ft_invariants([txin], outs, self.REF_A)
+
+    def test_ft_change_below_dust_raises(self):
+        """2.9M sent of 3M = 100k change < 2M dust."""
+        txin = self._ft_input(self.PKH_A, self.REF_A, 3_000_000)
+        outs = [
+            self._ft_output(self.PKH_B, self.REF_A, 2_900_000),
+            self._ft_output(self.PKH_A, self.REF_A, 100_000),
+        ]
+        with self.assertRaises(glyph.SendFtError) as cm:
+            glyph.assert_ft_invariants([txin], outs, self.REF_A)
+        self.assertEqual(cm.exception.reason, 'dust_change')
+
+    def test_recipient_below_dust_raises(self):
+        """Sending dust-sized amount to recipient means recipient is
+        stranded — same failure mode as dust change."""
+        txin = self._ft_input(self.PKH_A, self.REF_A, 3_000_000)
+        outs = [
+            self._ft_output(self.PKH_B, self.REF_A, 500_000),
+            self._ft_output(self.PKH_A, self.REF_A, 2_500_000),
+        ]
+        with self.assertRaises(glyph.SendFtError) as cm:
+            glyph.assert_ft_invariants([txin], outs, self.REF_A)
+        self.assertEqual(cm.exception.reason, 'dust_change')
+
+    def test_conservation_violation_raises(self):
+        """2M input, 3M output — photons created from nothing."""
+        txin = self._ft_input(self.PKH_A, self.REF_A, 2_000_000)
+        out = self._ft_output(self.PKH_B, self.REF_A, 3_000_000)
+        with self.assertRaises(glyph.SendFtError):
+            glyph.assert_ft_invariants([txin], [out], self.REF_A)
+
+    def test_mixed_ref_inputs_raise(self):
+        """Two FT inputs with different refs can't coexist in one tx."""
+        txin_a = self._ft_input(self.PKH_A, self.REF_A, 2_000_000)
+        txin_b = self._ft_input(self.PKH_A, self.REF_B, 2_000_000)
+        out = self._ft_output(self.PKH_B, self.REF_A, 4_000_000)
+        with self.assertRaises(glyph.GlyphRefMismatch):
+            glyph.assert_ft_invariants([txin_a, txin_b], [out], self.REF_A)
+
+    def test_output_ref_mismatch_raises(self):
+        """Output ref differs from input ref — silent rug-pull prevented."""
+        txin = self._ft_input(self.PKH_A, self.REF_A, 3_000_000)
+        out = self._ft_output(self.PKH_B, self.REF_B, 3_000_000)  # wrong ref
+        with self.assertRaises(glyph.GlyphRefMismatch):
+            glyph.assert_ft_invariants([txin], [out], self.REF_A)
+
+    def test_spoofed_cached_ref_raises_invariant_7(self):
+        """Invariant #7: if txin's glyph_ref tag lies about the actual
+        ref in the scriptPubKey bytes, re-extraction catches it. This
+        is the anti-peer-substitution check."""
+        from .. import glyph as g
+        # scriptPubKey has REF_A, but cached tag claims REF_B.
+        spk = g.GlyphFTOutput.from_pkh_ref(self.PKH_A, self.REF_A).script
+        spoofed = {
+            'glyph_kind': 'ft_holder',
+            'glyph_ref': self.REF_B.hex(),  # LIES
+            'prev_scriptPubKey_hex': spk.hex(),
+            'value': 3_000_000,
+        }
+        out = self._ft_output(self.PKH_B, self.REF_B, 3_000_000)
+        with self.assertRaises(glyph.GlyphRefMismatch):
+            g.assert_ft_invariants([spoofed], [out], self.REF_B)
+
+    def test_missing_prev_scriptpubkey_raises(self):
+        """FT input without prev_scriptPubKey_hex can't verify
+        invariant 7; refuse to sign."""
+        txin = {
+            'glyph_kind': 'ft_holder',
+            'glyph_ref': self.REF_A.hex(),
+            'value': 3_000_000,
+            # no prev_scriptPubKey_hex
+        }
+        out = self._ft_output(self.PKH_B, self.REF_A, 3_000_000)
+        with self.assertRaises(glyph.SendFtError) as cm:
+            glyph.assert_ft_invariants([txin], [out], self.REF_A)
+        self.assertEqual(cm.exception.reason, 'ref_mismatch')
+
+    def test_no_ft_inputs_raises(self):
+        """Empty / RXD-only input list is not a valid FT tx."""
+        rxd_txin = {'value': 1_000_000}
+        out = self._ft_output(self.PKH_B, self.REF_A, 1_000_000)
+        with self.assertRaises(glyph.SendFtError):
+            glyph.assert_ft_invariants([rxd_txin], [out], self.REF_A)
+
+    def test_nft_input_in_ft_send_raises(self):
+        """NFT singleton can't ride along in an FT send (v1 scope)."""
+        nft_in = {
+            'glyph_kind': 'nft_singleton',
+            'glyph_ref': self.REF_A.hex(),
+            'prev_scriptPubKey_hex': 'ff' * 63,  # doesn't matter, rejected early
+            'value': 1,
+        }
+        out = self._ft_output(self.PKH_B, self.REF_A, 1)
+        with self.assertRaises(glyph.SendFtError) as cm:
+            glyph.assert_ft_invariants([nft_in], [out], self.REF_A)
+        self.assertEqual(cm.exception.reason, 'ref_mismatch')
+
+    def test_invalid_target_ref_length_raises(self):
+        """target_ref must be 36 bytes."""
+        txin = self._ft_input(self.PKH_A, self.REF_A, 2_000_000)
+        out = self._ft_output(self.PKH_B, self.REF_A, 2_000_000)
+        with self.assertRaises(glyph.SendFtError) as cm:
+            glyph.assert_ft_invariants([txin], [out], b'\x00' * 32)  # 32B, not 36B
+        self.assertEqual(cm.exception.reason, 'invalid_ref')
 
 
 if __name__ == '__main__':

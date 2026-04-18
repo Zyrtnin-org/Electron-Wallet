@@ -235,24 +235,137 @@ def assert_ft_invariants(inputs, outputs, target_ref: bytes) -> None:
     Raises on any violation — never uses `assert` because `python -O`
     strips assertions.
 
-    Invariants (see plan doc for rationale):
+    `inputs` is an iterable of txin dicts (with 'glyph_kind',
+    'glyph_ref', 'prev_scriptPubKey_hex', 'value' keys for Glyph inputs;
+    plain RXD inputs are identified by the absence of 'glyph_kind').
+
+    `outputs` is an iterable of (type, addr_or_ScriptOutput, value)
+    tuples. FT outputs are ScriptOutput subclasses (GlyphFTOutput or
+    similar); plain RXD outputs are Address instances.
+
+    Invariants:
       1. All FT inputs share the same 36-byte ref.
       2. Every FT output's ref equals the FT-input ref.
       3. Sum of FT input photons == Sum of FT output photons.
       4. RXD-change outputs are pure P2PKH (never Glyph scripts).
       5. FT-change photons >= FT_DUST_THRESHOLD (or zero).
-      6. RXD fee funding suffices (caller's fee loop must succeed first;
-         this invariant assumes the tx as passed has already converged).
+      6. No FT output has value < FT_DUST_THRESHOLD (covers both the
+         recipient output AND any change).
       7. For each FT input, re-extract ref from scriptPubKey bytes and
-         assert it matches target_ref. Content-addressed check; closes
-         peer-substitution attacks.
+         assert it matches target_ref (content-addressed, peer-proof).
 
-    Implementation will be completed in PR D (the builder PR) — this
-    stub lands in PR C so callers can import the symbol now and the
-    exception types are all resolvable."""
-    raise NotImplementedError(
-        'assert_ft_invariants is implemented in PR D (builder). '
-        'PR C lands the symbol, constants, and exception hierarchy; '
-        'the body requires builder helpers (_select_ft_inputs, etc) '
-        'that arrive in PR D.'
-    )
+    All invariants except #7 operate on pure Python data (no network
+    calls). #7 re-parses the scriptPubKey bytes already present on the
+    txin; it's still pure-Python and O(n_inputs * 75B script walk).
+    """
+    if len(target_ref) != REF_LEN:
+        raise SendFtError(
+            'invalid_ref',
+            f'target_ref must be {REF_LEN} bytes, got {len(target_ref)}')
+
+    # Classify inputs into FT vs RXD buckets.
+    ft_inputs = []
+    for txin in inputs:
+        kind = txin.get('glyph_kind')
+        if kind == 'ft_holder':
+            ft_inputs.append(txin)
+        elif kind == 'nft_singleton':
+            # NFTs cannot be mixed with FT sends in v1.
+            raise SendFtError(
+                'ref_mismatch',
+                'NFT singleton input found in FT send; multi-kind sends not supported')
+        # Other types (plain P2PKH fee inputs, 'unknown', etc) are fine.
+
+    if not ft_inputs:
+        raise SendFtError(
+            'ref_mismatch',
+            'no FT inputs in tx; make_unsigned_ft_transaction requires at least one')
+
+    # Invariants 1 + 7: all FT inputs share target_ref, and the ref on
+    # each txin is consistent with the raw scriptPubKey bytes.
+    target_ref_hex = target_ref.hex()
+    for txin in ft_inputs:
+        # Content-addressed re-check (invariant 7): reconstruct the
+        # output from scriptPubKey bytes and read its ref. If a peer or
+        # storage layer lied about `glyph_ref`, GlyphFTOutput.from the
+        # bytes reveals the truth.
+        spk_hex = txin.get('prev_scriptPubKey_hex')
+        if not spk_hex:
+            raise SendFtError(
+                'ref_mismatch',
+                'FT input missing prev_scriptPubKey_hex; cannot verify ref')
+        try:
+            actual_ref = GlyphFTOutput(bytes.fromhex(spk_hex)).ref
+        except GlyphError as e:
+            raise SendFtError(
+                'ref_mismatch',
+                f'FT input scriptPubKey does not match FT template: {e}')
+        if actual_ref != target_ref:
+            raise GlyphRefMismatch(
+                f'FT input ref {actual_ref.hex()} does not match target '
+                f'{target_ref_hex}')
+        # Also check the cached tag matches (defense-in-depth).
+        cached = txin.get('glyph_ref')
+        if cached is not None and cached != target_ref_hex:
+            raise GlyphRefMismatch(
+                f'cached glyph_ref tag {cached} on txin does not match '
+                f'target {target_ref_hex}')
+
+    # Classify outputs into FT vs RXD and run invariants 2-6.
+    ft_outputs = []
+    rxd_outputs = []
+    for out in outputs:
+        _out_type, addr, value = out
+        if isinstance(addr, GlyphFTOutput):
+            ft_outputs.append((addr, value))
+        else:
+            rxd_outputs.append((addr, value))
+
+    if not ft_outputs:
+        raise SendFtError(
+            'ref_mismatch',
+            'no FT outputs in tx; FT input photons must go somewhere')
+
+    # Invariant 2: every FT output's ref equals target_ref.
+    for ft_out, value in ft_outputs:
+        if ft_out.ref != target_ref:
+            raise GlyphRefMismatch(
+                f'FT output ref {ft_out.ref.hex()} does not match target '
+                f'{target_ref_hex}')
+
+    # Invariant 4: no RXD output is itself a Glyph shape.
+    for rxd_out, value in rxd_outputs:
+        # Addresses that carry glyph shapes would be classifier-matched
+        # instances, not plain Addresses. The isinstance filter above
+        # catches that, but also check for the defensive case where
+        # someone passes a ScriptOutput containing pushrefs as "RXD".
+        from .classifier import extract_all_pushrefs
+        try:
+            spk = rxd_out.to_script() if hasattr(rxd_out, 'to_script') else b''
+        except Exception:
+            spk = b''
+        if extract_all_pushrefs(spk):
+            raise SendFtError(
+                'ref_mismatch',
+                'RXD output contains push-refs; Glyph outputs must be '
+                'GlyphFTOutput instances, not raw ScriptOutput')
+
+    # Invariant 3: photon conservation.
+    ft_in_sum = sum(txin['value'] for txin in ft_inputs)
+    ft_out_sum = sum(v for _out, v in ft_outputs)
+    if ft_in_sum != ft_out_sum:
+        raise SendFtError(
+            'ref_mismatch',
+            f'FT photon conservation violated: inputs={ft_in_sum}, '
+            f'outputs={ft_out_sum}')
+
+    # Invariants 5 + 6: FT-change (and any FT output) must be >= dust.
+    # A recipient output below dust threshold means the recipient can't
+    # economically spend it later — same stranding problem as change.
+    for ft_out, value in ft_outputs:
+        if value < FT_DUST_THRESHOLD:
+            raise SendFtError(
+                'dust_change',
+                f'FT output of {value} photons below dust threshold '
+                f'({FT_DUST_THRESHOLD}); recipient cannot economically '
+                f'spend it at 10k sat/byte')
