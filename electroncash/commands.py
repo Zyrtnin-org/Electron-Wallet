@@ -837,6 +837,186 @@ class Commands:
         to config settings (static/dynamic)"""
         return self.config.fee_per_kb()
 
+    # ----- Radiant Glyph FT commands --------------------------------------
+    #
+    # Agent-native parity for the GUI FT flow. Headless agents (and
+    # power users) reach the same make_unsigned_ft_transaction path the
+    # Qt Send-tab uses, with structured error reasons instead of raw
+    # exception strings so callers can branch on them.
+    #
+    # Safety gate: send_ft defaults to dry_run=True. Broadcast only
+    # happens when the caller explicitly passes dry_run=False.
+
+    @command('w')
+    def get_ft_balances(self):
+        """Return a dict of per-ref Glyph FT balances held by the wallet.
+
+        Keys are the 72-char hex ref. Values are {'balance': photons,
+        'utxo_count': n}. NFT singletons are not included (they're not
+        fungible; one UTXO per singleton).
+        """
+        return self.wallet.get_ft_balances()
+
+    @command('w')
+    def list_ft_utxos(self, ref=None):
+        """List the wallet's Glyph FT UTXOs. If `ref` (72-char hex) is
+        given, filter to that ref only; otherwise return all FT UTXOs
+        across all refs.
+
+        Each entry includes prevout_hash, prevout_n, address, value
+        (photons), glyph_ref, and glyph_kind. NFT singletons are
+        excluded.
+        """
+        coins = self.wallet.get_utxos(exclude_frozen=True, mature=True,
+                                      confirmed_only=False, exclude_slp=True,
+                                      exclude_glyph=False)
+        out = []
+        for c in coins:
+            if c.get('glyph_kind') != 'ft_holder':
+                continue
+            if ref is not None and c.get('glyph_ref') != ref:
+                continue
+            out.append({
+                'prevout_hash': c['prevout_hash'],
+                'prevout_n': c['prevout_n'],
+                'address': c['address'].to_ui_string(),
+                'value': c['value'],
+                'glyph_ref': c.get('glyph_ref'),
+                'glyph_kind': c.get('glyph_kind'),
+            })
+        return out
+
+    @command('w')
+    def setreflabel(self, ref, label):
+        """Set a user-friendly label for a Glyph FT ref. Label is
+        sanitized (Unicode Cc/Cf stripped, capped at 64 chars). Pass an
+        empty string to clear the label.
+
+        `ref` is the 72-char hex ref identifying the token.
+        """
+        from .glyph import sanitize_ref_label
+        labels = dict(self.wallet.storage.get('glyph_ref_labels', {}))
+        sanitized = sanitize_ref_label(label)
+        if sanitized:
+            labels[ref] = sanitized
+        else:
+            labels.pop(ref, None)
+        self.wallet.storage.put('glyph_ref_labels', labels)
+        return {'ref': ref, 'label': sanitized}
+
+    @command('wp')
+    def send_ft(self, ref, destination, amount, dry_run=True, password=None):
+        """Send a Radiant Glyph FT.
+
+        Arguments:
+          ref          72-char hex ref identifying the token.
+          destination  Radiant P2PKH address of the recipient.
+          amount       photons to deliver (integer).
+          dry_run      (default: True) — build + sign the tx but do NOT
+                       broadcast; returns the tx hex so the caller can
+                       run `testmempoolaccept '[<hex>]'` separately. Pass
+                       dry_run=False to broadcast after signing.
+
+        Returns a dict:
+          {
+            'broadcast': bool,
+            'tx_hex':    str,  # the signed tx, whether or not broadcast
+            'tx_hash':   str or None,  # if broadcast succeeded
+            'error':     None or a structured-reason dict (see below)
+          }
+
+        Error reasons (when 'error' is non-None):
+          'dust_change'         — FT change below 2M-photon dust threshold
+          'ref_mismatch'        — tx would violate photon conservation, or
+                                  the cached ref tag differs from the raw
+                                  scriptPubKey bytes
+          'invalid_ref'         — ref is not 72 hex chars / 36 bytes
+          'invalid_recipient'   — destination is not a Radiant P2PKH
+          'insufficient_fee'    — RXD too small for 10k-sat/byte fee
+          'insufficient_fee_fragmented' — enough RXD total, chunks too small
+          'broadcast_failed'    — signed OK but network rejected
+        """
+        from .address import Address
+        from .glyph import (
+            GlyphError, SendFtError, GlyphRefMismatch, NotEnoughRxdForFtFee,
+        )
+
+        # Validate and parse arguments.
+        try:
+            target_ref = bytes.fromhex(ref)
+        except Exception:
+            return {'broadcast': False, 'tx_hex': None, 'tx_hash': None,
+                    'error': {'reason': 'invalid_ref',
+                              'message': 'ref is not valid hex'}}
+        if len(target_ref) != 36:
+            return {'broadcast': False, 'tx_hex': None, 'tx_hash': None,
+                    'error': {'reason': 'invalid_ref',
+                              'message': f'ref must be 36 bytes, got {len(target_ref)}'}}
+        try:
+            recipient = Address.from_string(destination)
+        except Exception as e:
+            return {'broadcast': False, 'tx_hex': None, 'tx_hash': None,
+                    'error': {'reason': 'invalid_recipient',
+                              'message': str(e)}}
+        try:
+            amount_photons = int(amount)
+        except Exception:
+            return {'broadcast': False, 'tx_hex': None, 'tx_hash': None,
+                    'error': {'reason': 'invalid_recipient',
+                              'message': f'amount must be integer, got {amount!r}'}}
+
+        # Build the unsigned tx.
+        try:
+            tx = self.wallet.make_unsigned_ft_transaction(
+                target_ref, recipient, amount_photons, self.config,
+            )
+        except SendFtError as e:
+            return {'broadcast': False, 'tx_hex': None, 'tx_hash': None,
+                    'error': {'reason': e.reason, 'message': str(e)}}
+        except GlyphRefMismatch as e:
+            return {'broadcast': False, 'tx_hex': None, 'tx_hash': None,
+                    'error': {'reason': 'ref_mismatch', 'message': str(e)}}
+        except NotEnoughRxdForFtFee as e:
+            reason = ('insufficient_fee_fragmented'
+                      if getattr(e, 'fragmented', False)
+                      else 'insufficient_fee')
+            return {'broadcast': False, 'tx_hex': None, 'tx_hash': None,
+                    'error': {'reason': reason, 'message': str(e)}}
+        except GlyphError as e:
+            return {'broadcast': False, 'tx_hex': None, 'tx_hash': None,
+                    'error': {'reason': 'ref_mismatch', 'message': str(e)}}
+
+        # Sign.
+        self.wallet.sign_transaction(tx, password)
+
+        # Second-pass semantic preflight.
+        from .glyph import assert_ft_invariants
+        try:
+            assert_ft_invariants(tx.inputs(), tx.outputs(), target_ref)
+        except GlyphError as e:
+            return {'broadcast': False, 'tx_hex': str(tx), 'tx_hash': None,
+                    'error': {'reason': 'ref_mismatch', 'message': str(e)}}
+
+        tx_hex = str(tx)
+        if dry_run:
+            # Return the signed tx for the caller to run testmempoolaccept
+            # or broadcast themselves. No network interaction.
+            return {'broadcast': False, 'tx_hex': tx_hex,
+                    'tx_hash': tx.txid(), 'error': None}
+
+        # Broadcast — network required for this path.
+        if self.network is None:
+            return {'broadcast': False, 'tx_hex': tx_hex, 'tx_hash': None,
+                    'error': {'reason': 'broadcast_failed',
+                              'message': 'daemon offline; cannot broadcast'}}
+        ok, result = self.network.broadcast_transaction(tx)
+        if not ok:
+            return {'broadcast': False, 'tx_hex': tx_hex, 'tx_hash': None,
+                    'error': {'reason': 'broadcast_failed',
+                              'message': str(result)}}
+        return {'broadcast': True, 'tx_hex': tx_hex, 'tx_hash': result,
+                'error': None}
+
     @command('')
     def help(self):
         # for the python console
