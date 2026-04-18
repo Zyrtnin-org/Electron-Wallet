@@ -1023,6 +1023,9 @@ class _ColorScheme:
         self.DEEPGREEN = ColorSchemeItem("#335c33", "#7ac276")
         self.GREEN = ColorSchemeItem("#117c11", "#8af296")
         self.SLPGREEN = ColorSchemeItem("#25863f", "#8af296") # darker alternative: ColorSchemeItem("#25863f", "#60bc70")
+        # Radiant Glyph FT/NFT UTXOs — distinct from SLPGREEN so the Coins tab
+        # shows at a glance which rows are Glyph-token UTXOs vs SLP ones.
+        self.GLYPHBG = ColorSchemeItem("#a67309", "#ffd27a")
         self.YELLOW = ColorSchemeItem("#897b2a", "#ffff00")
         self.PINK = ColorSchemeItem("#9c4444", "#ffbaba")
         self.RED = ColorSchemeItem("#7c1111", "#f18c8c")

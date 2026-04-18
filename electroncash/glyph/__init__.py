@@ -43,6 +43,9 @@ from .core import (
     FT_DUST_THRESHOLD,
     REF_LEN,
     PKH_LEN,
+    REF_LABEL_MAX_LEN,
+    # Label helper
+    sanitize_ref_label,
     # Output builder
     GlyphFTOutput,
     # Exceptions

@@ -1147,6 +1147,34 @@ class Abstract_Wallet(PrintError, SPVDelegate):
             xx += x
         return cc, uu, xx
 
+    def get_ft_balances(self):
+        """Per-ref summed photon balance across all Glyph FT holder UTXOs
+        in the wallet. Returns a dict keyed by 36-byte ref hex →
+        {'balance': int photons, 'utxo_count': int}.
+
+        Used by the Tokens tab (PR F+G) and the Send-tab Asset dropdown.
+        Unlike `get_balance`, this pulls from `glyph.ref_ids` + live UTXO
+        values rather than cached balance counters — cheap enough for
+        desktop scale (hundreds of UTXOs).
+
+        NFT singletons are excluded (they're 1-sat each and aren't
+        fungible)."""
+        balances = {}
+        # Pull fresh FT coins, bypassing the exclude_glyph=True default.
+        coins = self.get_utxos(exclude_frozen=True, mature=True,
+                               confirmed_only=False, exclude_slp=True,
+                               exclude_glyph=False)
+        for c in coins:
+            if c.get('glyph_kind') != 'ft_holder':
+                continue
+            ref = c.get('glyph_ref')
+            if not ref:
+                continue
+            slot = balances.setdefault(ref, {'balance': 0, 'utxo_count': 0})
+            slot['balance'] += c['value']
+            slot['utxo_count'] += 1
+        return balances
+
     def get_address_history(self, address):
         assert isinstance(address, Address)
         return self._history.get(address, [])

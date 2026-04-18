@@ -567,5 +567,38 @@ class AssertFtInvariantsTests(unittest.TestCase):
         self.assertEqual(cm.exception.reason, 'invalid_ref')
 
 
+class SanitizeRefLabelTests(unittest.TestCase):
+    """sanitize_ref_label strips bidi overrides and control chars,
+    caps length, and returns '' for non-str inputs. Used by the
+    confirmation modal and Tokens tab to neutralize label-injection
+    attacks."""
+
+    def test_ascii_passes_through(self):
+        self.assertEqual(glyph.sanitize_ref_label('MyToken'), 'MyToken')
+
+    def test_strips_bidi_override(self):
+        # U+202E RIGHT-TO-LEFT OVERRIDE can visually rewrite the line.
+        self.assertEqual(
+            glyph.sanitize_ref_label('hi\u202eevil'), 'hievil')
+
+    def test_strips_zero_width_joiner(self):
+        # U+200D is category Cf.
+        self.assertEqual(glyph.sanitize_ref_label('a\u200db'), 'ab')
+
+    def test_strips_nul_and_newline(self):
+        # Cc category.
+        self.assertEqual(glyph.sanitize_ref_label('hi\x00world'), 'hiworld')
+        self.assertEqual(glyph.sanitize_ref_label('a\nb'), 'ab')
+
+    def test_caps_length(self):
+        out = glyph.sanitize_ref_label('x' * 200)
+        self.assertEqual(len(out), glyph.REF_LABEL_MAX_LEN)
+
+    def test_non_str_returns_empty(self):
+        self.assertEqual(glyph.sanitize_ref_label(None), '')
+        self.assertEqual(glyph.sanitize_ref_label(12345), '')
+        self.assertEqual(glyph.sanitize_ref_label(b'bytes'), '')
+
+
 if __name__ == '__main__':
     unittest.main()

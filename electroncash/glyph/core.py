@@ -57,6 +57,37 @@ REF_LEN: Final[int] = 36
 # Pubkey-hash length (20 bytes for standard RIPEMD160(SHA256(pubkey))).
 PKH_LEN: Final[int] = 20
 
+# Maximum length for a user-editable FT ref label, in characters.
+# Enforced at display + storage time. Short enough to keep the
+# confirmation modal readable; long enough for a human-friendly token
+# name.
+REF_LABEL_MAX_LEN: Final[int] = 64
+
+
+def sanitize_ref_label(text) -> str:
+    """Clean a user-editable FT ref label for safe display and storage.
+
+    Protections applied (security-sentinel H3 finding):
+      - Strips Unicode Cc (control) and Cf (format) categories. This
+        removes RTL/LTR overrides (U+202E, U+2066-U+2069), zero-width
+        joiners/non-joiners, and any NUL / newline bytes that could
+        visually rewrite the confirmation modal's recipient line.
+      - Truncates to REF_LABEL_MAX_LEN characters.
+      - Rejects non-str input by coercing to '' (never crashes; label
+        fields are best-effort UX).
+
+    The full 72-char ref hex must still be shown in the confirmation
+    modal above the label — sanitization alone is not enough; the hex
+    is the authoritative identifier."""
+    if not isinstance(text, str):
+        return ''
+    import unicodedata
+    cleaned = ''.join(
+        c for c in text
+        if unicodedata.category(c) not in ('Cc', 'Cf')
+    )
+    return cleaned[:REF_LABEL_MAX_LEN]
+
 
 # --- Exception hierarchy ---------------------------------------------------
 

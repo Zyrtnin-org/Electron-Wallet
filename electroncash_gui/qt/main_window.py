@@ -189,6 +189,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.receive_tab = self.create_receive_tab()
         self.addresses_tab = self.create_addresses_tab()
         self.utxo_tab = self.create_utxo_tab()
+        self.tokens_tab = self.create_tokens_tab()
         self.console_tab = self.create_console_tab()
         self.contacts_tab = self.create_contacts_tab()
         tabs.addTab(self.create_history_tab(), QIcon(":icons/tab_history.png"), _('History'))
@@ -207,6 +208,10 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
 
         add_optional_tab(tabs, self.addresses_tab, QIcon(":icons/tab_addresses.png"), _("&Addresses"), "addresses")
         add_optional_tab(tabs, self.utxo_tab, QIcon(":icons/tab_coins.png"), _("Co&ins"), "utxo")
+        # Radiant Glyph FT tokens — hidden by default until the user holds
+        # at least one FT. Wallets without any FT UTXOs see an empty list
+        # even if they enable the tab, so default-off is correct.
+        add_optional_tab(tabs, self.tokens_tab, QIcon(":icons/tab_coins.png"), _("To&kens"), "tokens", False)
         add_optional_tab(tabs, self.contacts_tab, QIcon(":icons/tab_contacts.png"), _("Con&tacts"), "contacts")
         add_optional_tab(tabs, self.console_tab, QIcon(":icons/tab_console.png"), _("Con&sole"), "console", False)
 
@@ -1060,6 +1065,14 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.utxo_list.update()
         self.contact_list.update()
         self.invoice_list.update()
+        # Radiant Glyph FT surfaces — Tokens tab + Send-tab Asset dropdown.
+        # These read wallet.get_ft_balances() each refresh, so they always
+        # match the live UTXO set. Guarded with hasattr for safety during
+        # __init__ ordering when tabs aren't yet attached.
+        if hasattr(self, 'tokens_list') and self.tokens_list is not None:
+            self.tokens_list.update()
+        if hasattr(self, 'asset_combo') and self.asset_combo is not None:
+            self._rebuild_asset_combo()
         self.update_completions()
         self.history_updated_signal.emit() # inform things like address_dialog that there's a new history, also clears self.tx_update_mgr.verif_q
         self.need_update.clear() # clear flag
@@ -1529,6 +1542,20 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.send_grid = grid = QGridLayout()
         grid.setSpacing(8)
         grid.setColumnStretch(3, 1)
+
+        # Row 0: Asset dropdown — selects "RXD" (default) or a Glyph FT
+        # ref. When a ref is picked, do_send routes through
+        # wallet.make_unsigned_ft_transaction instead of the plain-RXD
+        # path. Ref is stored in userData so we never parse it out of
+        # the display label.
+        from PyQt5.QtWidgets import QComboBox
+        self.asset_label = QLabel(_('&Asset'))
+        self.asset_combo = QComboBox()
+        self.asset_label.setBuddy(self.asset_combo)
+        grid.addWidget(self.asset_label, 0, 0)
+        grid.addWidget(self.asset_combo, 0, 1, 1, -1)
+        # Populate is deferred until wallet is ready (first tab refresh).
+        self.asset_combo.currentIndexChanged.connect(self._on_asset_changed)
 
         from .paytoedit import PayToEdit
         self.amount_e = BTCAmountEdit(self.get_decimal_point)
@@ -2128,9 +2155,176 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
     def do_preview(self):
         self.do_send(preview = True)
 
+    # ----- Radiant Glyph FT send --------------------------------------
+
+    def _rebuild_asset_combo(self):
+        """Populate the Asset dropdown with 'RXD' + one entry per FT
+        ref in the wallet. Uses QSignalBlocker to avoid firing
+        currentIndexChanged during rebuild."""
+        if not hasattr(self, 'asset_combo') or self.asset_combo is None:
+            return
+        from PyQt5.QtCore import QSignalBlocker
+        with QSignalBlocker(self.asset_combo):
+            prior_ref = self.asset_combo.currentData()
+            self.asset_combo.clear()
+            self.asset_combo.addItem(_('RXD'), userData=None)
+            try:
+                balances = self.wallet.get_ft_balances()
+            except Exception:
+                balances = {}
+            labels = self.wallet.storage.get('glyph_ref_labels', {})
+            from electroncash.glyph import sanitize_ref_label
+            for ref_hex, info in sorted(balances.items(),
+                                        key=lambda kv: -kv[1]['balance']):
+                label = sanitize_ref_label(labels.get(ref_hex, ''))
+                display = label or (ref_hex[:10] + '…' + ref_hex[-6:])
+                display = '{} ({} photons)'.format(display, info['balance'])
+                self.asset_combo.addItem(display, userData=ref_hex)
+            # Restore prior selection if still present.
+            if prior_ref:
+                idx = self.asset_combo.findData(prior_ref)
+                if idx >= 0:
+                    self.asset_combo.setCurrentIndex(idx)
+
+    def _on_asset_changed(self, idx):
+        """User changed the Asset dropdown selection. Clear the amount
+        field so they don't accidentally send a stale RXD amount as
+        an FT photon count."""
+        if hasattr(self, 'amount_e') and self.amount_e is not None:
+            self.amount_e.setText('')
+        # Also reset the "send_max" flag if set.
+        if hasattr(self, 'max_button') and self.max_button is not None:
+            if self.max_button.isChecked():
+                self.max_button.setChecked(False)
+
+    def _do_send_ft(self, ref_hex, preview=False):
+        """Dedicated send path for a Glyph FT. Reads the payto + amount
+        fields, builds an unsigned tx via wallet.make_unsigned_ft_
+        transaction, shows the confirmation modal, signs, broadcasts.
+
+        Preview mode shows the tx dialog without broadcasting."""
+        from electroncash.glyph import (
+            GlyphError, SendFtError, GlyphRefMismatch, NotEnoughRxdForFtFee,
+        )
+        from .glyph_send_dialog import show_ft_confirm, show_ft_error
+
+        # 1. Validate inputs.
+        recipient_text = self.payto_e.toPlainText().strip()
+        if not recipient_text:
+            self.show_error(_('Please enter a recipient address.'))
+            return
+        try:
+            from electroncash.address import Address
+            recipient = Address.from_string(recipient_text)
+        except Exception as e:
+            self.show_error(_('Invalid recipient address: {}').format(e))
+            return
+        try:
+            amount_photons = int(self.amount_e.get_amount() or 0)
+        except Exception:
+            amount_photons = 0
+        if amount_photons <= 0:
+            self.show_error(_('Please enter a positive amount (in photons).'))
+            return
+        try:
+            target_ref = bytes.fromhex(ref_hex)
+        except Exception:
+            self.show_error(_('Internal error: selected ref is not valid hex.'))
+            return
+
+        # 2. Build the unsigned tx (pure-data check, no network).
+        try:
+            tx = self.wallet.make_unsigned_ft_transaction(
+                target_ref, recipient, amount_photons, self.config,
+            )
+        except SendFtError as e:
+            show_ft_error(self, e.reason)
+            return
+        except GlyphRefMismatch as e:
+            show_ft_error(self, 'ref_mismatch', detail=str(e))
+            return
+        except NotEnoughRxdForFtFee as e:
+            if getattr(e, 'fragmented', False):
+                self.show_error(_(
+                    'Your RXD is split into pieces too small to cover '
+                    'the network fee (10,000 sats per byte). Consolidate '
+                    'first or reduce the amount.'
+                ))
+            else:
+                self.show_error(_(
+                    'Insufficient RXD for network fee: {}').format(e))
+            return
+        except GlyphError as e:
+            show_ft_error(self, 'ref_mismatch', detail=str(e))
+            return
+        except BaseException as e:
+            import traceback, sys
+            traceback.print_exc(file=sys.stderr)
+            self.show_error(str(e))
+            return
+
+        fee_sats = tx.get_fee()
+        # RXD change = output-sum minus FT outputs (FT outputs carry
+        # photons, not RXD-fee-eligible sats).
+        rxd_change = 0
+        for out in tx.outputs():
+            _typ, addr, val = out
+            # FT outputs are GlyphFTOutput instances (from our builder).
+            from electroncash.glyph import GlyphFTOutput
+            if not isinstance(addr, GlyphFTOutput):
+                rxd_change += val
+
+        # 3. Preview bypasses the confirmation modal.
+        if preview:
+            self.show_transaction(tx, f'Glyph FT send {ref_hex[:10]}…')
+            return
+
+        # 4. Confirmation modal.
+        confirmed = show_ft_confirm(
+            self, self.wallet, ref_hex, amount_photons, recipient,
+            fee_sats, rxd_change,
+        )
+        if not confirmed:
+            return
+
+        # 5. Sign.
+        try:
+            password = self.password_dialog() if self.wallet.has_password() else None
+            if self.wallet.has_password() and password is None:
+                return
+            self.wallet.sign_transaction(tx, password)
+        except BaseException as e:
+            import traceback, sys
+            traceback.print_exc(file=sys.stderr)
+            self.show_error(_('Signing failed: {}').format(e))
+            return
+
+        # 6. Semantic preflight (second pass — cheap, microseconds).
+        try:
+            from electroncash.glyph import assert_ft_invariants
+            assert_ft_invariants(tx.inputs(), tx.outputs(), target_ref)
+        except GlyphError as e:
+            show_ft_error(self, 'ref_mismatch', detail=str(e))
+            return
+
+        # 7. Broadcast. Upstream's existing broadcast infrastructure
+        #    handles the testmempoolaccept / send cycle.
+        self.broadcast_transaction(tx, f'Glyph FT send {ref_hex[:10]}…')
+
     def do_send(self, preview = False):
         if run_hook('abort_send', self):
             return
+
+        # Radiant Glyph FT route: if the Asset dropdown has a ref
+        # selected (not "RXD"), send via the Glyph-aware builder instead
+        # of the plain RXD path. All of the normal do_send logic below
+        # is RXD-only; Glyph FTs have their own confirmation modal
+        # (glyph_send_dialog.show_ft_confirm) and their own builder
+        # (wallet.make_unsigned_ft_transaction).
+        if hasattr(self, 'asset_combo') and self.asset_combo is not None:
+            ref_hex = self.asset_combo.currentData()
+            if ref_hex:
+                return self._do_send_ft(ref_hex, preview=preview)
 
         # paranoia -- force a resolve right away in case user pasted an
         # openalias or cashacct and hit preview too quickly.
@@ -2586,6 +2780,30 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         from .utxo_list import UTXOList
         self.utxo_list = l = UTXOList(self)
         return self.create_list_tab(l)
+
+    def create_tokens_tab(self):
+        """Radiant Glyph FT per-ref balance view. Wired to the Send tab
+        via TokensList.send_ft_requested — double-clicking a row
+        preselects that ref in the Send tab's Asset dropdown."""
+        from .tokens_list import TokensList
+        self.tokens_list = l = TokensList(self)
+        l.send_ft_requested.connect(self._on_tokens_tab_send_requested)
+        return self.create_list_tab(l)
+
+    def _on_tokens_tab_send_requested(self, ref_hex):
+        """User double-clicked an FT row; open the Send tab with the
+        Asset dropdown preselected to that ref."""
+        if hasattr(self, 'asset_combo') and self.asset_combo is not None:
+            idx = self.asset_combo.findData(ref_hex)
+            if idx >= 0:
+                self.asset_combo.setCurrentIndex(idx)
+        # Switch to the Send tab (it's the tab at position 1).
+        try:
+            send_idx = self.tabs.indexOf(self.send_tab)
+            if send_idx >= 0:
+                self.tabs.setCurrentIndex(send_idx)
+        except Exception:
+            pass
 
     def create_contacts_tab(self):
         from .contact_list import ContactList
