@@ -11,6 +11,93 @@ Forked from Electron Cash.
   Language: Python
   Homepage: https://electroncash.org/
 
+.. WARNING ::
+
+   This fork (``Zyrtnin-org/Electron-Wallet``) is an **experimental
+   beta** adding Radiant Glyph FT (fungible token) send support on top
+   of the upstream ``Radiant-Core/Electron-Wallet`` classifier work
+   (PR #2). It has NOT been audited by a third party, NOT shipped as
+   a signed release, and NOT reviewed by the upstream maintainers at
+   Radiant-Core.
+
+   Do not use this build to move funds you are not willing to lose.
+   Do not treat ``testmempoolaccept: allowed=true`` as a substitute
+   for an end-to-end review of the signing, consensus, and GUI paths.
+
+   **What's been verified:**
+
+   - Consensus parity with ``radiant-node`` is proven cryptographically
+     (the signing preimage assembled by this code byte-matches the one
+     the node signs against). See
+     ``electroncash/tests/test_transaction.py::TestRadiantPreimage``.
+   - A Python-built, Python-signed FT send was accepted by a live
+     mainnet ``testmempoolaccept`` and broadcast successfully (txid
+     ``3115ec4bfc580dd22599e4b253509b4cc29f058e38ebb686a13097a6b4ab49c2``).
+     See ``docs/MAINNET_PROOF.md``.
+   - 122 local unit + integration tests pass.
+
+   **What's been deliberately deferred:**
+
+   - Third-party security audit. The signing, coin-selection, and
+     sighash-extension code paths touch consensus-critical bytes; a
+     subtle bug can burn mint authority or misdirect photons.
+   - Hardware wallet (Ledger) signing for FT inputs — the firmware
+     path only handles NFT singletons today. Spending FTs via Ledger
+     will fail until ``Radiant-Core/app-radiant`` ships matching
+     firmware.
+   - Long-soaked mainnet usage. The live-proof tx above is a single
+     self-send; real-world edge cases (reorgs, fragmented RXD for
+     fees, label injection attempts in the confirmation modal) have
+     limited production exposure.
+   - Coin-control integration for per-FT-UTXO freezes. Advanced users
+     should wait for this.
+
+   **Where bugs are most likely:** (a) the fee fixed-point loop when
+   RXD is highly fragmented, (b) the per-output ``hashOutputHashes``
+   summary computation for unusual scriptPubKey shapes beyond 75B FT
+   holders / 63B NFT singletons / 25B P2PKH / OP_RETURN, (c) label
+   sanitization edge cases (new Unicode categories, emoji ZWJ
+   sequences). The ``docs/MAINNET_PROOF.md`` section "Post-fix: size
+   formula" records one bug the live proof already caught.
+
+   Please report problems as GitHub issues on
+   https://github.com/Zyrtnin-org/Electron-Wallet/issues — and DO NOT
+   push FT sends to production exchanges or merchants using this
+   build until the upstream PR series has merged and been tagged.
+
+Radiant Glyph FT support
+========================
+
+This fork adds **send** support for Radiant Glyph fungible tokens on
+top of the classifier landed in upstream PR #2. After updating, your
+wallet will:
+
+- Display per-ref FT balances in a new Tokens tab (opt-in via
+  ``Show Tokens tab``; off by default for wallets with no FT holdings).
+- Color-highlight FT UTXOs in the Coins tab (amber) so they're
+  distinguishable from plain RXD at a glance.
+- Add an Asset dropdown to the Send tab — picking a ref routes the
+  send through a dedicated FT builder with its own confirmation modal.
+
+The confirmation modal shows the full 72-char ref hex (monospace, the
+authoritative identifier) above the user-editable label. Labels are
+sanitized (Unicode bidi overrides and control characters stripped,
+64-character cap) to neutralize any attempt to visually rewrite the
+recipient line via a malicious token name.
+
+For CLI / JSON-RPC agents, four new Commands methods match the GUI
+surface: ``send_ft`` (defaults to ``dry_run=True``),
+``get_ft_balances``, ``list_ft_utxos``, ``setreflabel``. Structured
+error reasons (``dust_change``, ``insufficient_fee``,
+``insufficient_fee_fragmented``, ``ref_mismatch``,
+``invalid_recipient``, etc) are returned instead of raw exception
+strings so agents can branch on them.
+
+The architecture, rationale, and PR-by-PR breakdown are documented at
+`docs/plans/2026-04-18-feat-glyph-ft-send-plan.md
+<docs/plans/2026-04-18-feat-glyph-ft-send-plan.md>`_. Live mainnet
+evidence is at `docs/MAINNET_PROOF.md <docs/MAINNET_PROOF.md>`_.
+
 Server Mainnet List
 ===============
 
