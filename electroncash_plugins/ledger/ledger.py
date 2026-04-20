@@ -500,8 +500,33 @@ class Ledger_KeyStore(Hardware_KeyStore):
         finally:
             self.handler.finished()
 
+        # B1 (SECURITY_AUDIT_2026-04-20): before applying each device-
+        # produced signature to the tx, verify it locally against the
+        # sighash we recompute from the same tx object. Catches every
+        # wallet/firmware sighash divergence (scriptcode mismatch, ref-
+        # sort drift, hashOutputHashes bug, or a compromised firmware
+        # returning nonsense) pre-broadcast — instead of silently
+        # producing a tx that fails at the mempool.
+        from electroncash.bitcoin import Hash as _sha256d
         for i, txin in enumerate(tx.inputs()):
             signingPos = inputs[i][4]
+            sig_with_hashtype = bytes(signatures[i])
+            der_sig = sig_with_hashtype[:-1]
+            sighash_type = sig_with_hashtype[-1]
+            preimage_hex = tx.serialize_preimage(i, sighash_type)
+            msghash = _sha256d(bfh(preimage_hex))
+            pubkey_bytes = bfh(pubKeys[i][signingPos])
+            reasons = []
+            if not Transaction.verify_signature(pubkey_bytes, der_sig,
+                                                msghash, reason=reasons):
+                why = '; '.join(reasons) if reasons else 'signature invalid'
+                raise Exception(_(
+                    'Ledger signature for input {idx} did not verify '
+                    'locally against the wallet-computed sighash '
+                    '(reason: {why}). The device signed a different '
+                    'message than the wallet built. DO NOT broadcast; '
+                    'this is a firmware or wallet bug and should be '
+                    'reported.').format(idx=i, why=why))
             txin['signatures'][signingPos] = bh2u(signatures[i])
         tx.raw = tx.serialize()
 

@@ -2737,13 +2737,22 @@ class Abstract_Wallet(PrintError, SPVDelegate):
                 # because the classifier mapped the output to TYPE_ADDRESS.
                 prev_spk_hex = self.glyph.prev_scriptpubkey_hex_for_txo(txo_key)
                 if prev_spk_hex is None:
-                    # Parent tx not in wallet store — can't sign safely.
-                    # Fall back to p2pkh type; signing will fail consensus
-                    # but the wallet won't crash.
-                    txin['type'] = 'p2pkh'
-                else:
-                    txin['prev_scriptPubKey_hex'] = prev_spk_hex
-                    txin['glyph_ref'] = self.glyph.ref_info_for_txo(txo_key)
+                    # B4 (SECURITY_AUDIT_2026-04-20): the prior behaviour
+                    # silently reset txin['type'] to 'p2pkh' and let
+                    # signing proceed with a 25-byte-prologue scriptCode
+                    # against a 75B/63B consensus script — producing a
+                    # tx that passes `tx.is_complete()` but fails at
+                    # broadcast. Hard-fail instead so callers (GUI,
+                    # console, PSBT importers) get an explicit
+                    # GlyphError they can surface to the user.
+                    from .glyph import GlyphError
+                    raise GlyphError(
+                        f'Parent transaction {txin["prevout_hash"]} is not '
+                        f'in the wallet store — cannot sign Glyph '
+                        f'{glyph_kind} input {txo_key} safely. '
+                        f'Import the parent tx or resync the wallet.')
+                txin['prev_scriptPubKey_hex'] = prev_spk_hex
+                txin['glyph_ref'] = self.glyph.ref_info_for_txo(txo_key)
             self.add_input_sig_info(txin, address)
 
     def can_sign(self, tx):

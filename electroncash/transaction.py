@@ -805,10 +805,14 @@ class Transaction:
         # Emit totalRefs | refsHash (36 bytes). See docstring for layout.
         refs = glyph_mod.extract_all_pushrefs(spk_bytes)
         if refs:
-            # std::set<uint288> sort order: MSB-first reverse of each ref's
-            # little-endian bytes (uint256.h::Compare comment at line 47).
-            # Equivalent to sorting by the reversed byte sequence.
-            sorted_refs = sorted(set(refs), key=lambda r: r[::-1])
+            # B2 (SECURITY_AUDIT_2026-04-20): canonical sort is raw byte-
+            # lex (what firmware's memcmp produces and what the Python
+            # oracle's hex-sort produces). Prior reversed-byte sort
+            # ("MSB-first") is an outlier — it happens to agree on
+            # single-ref outputs (sort is a no-op) but diverges from
+            # consensus on the first multi-ref output. Fixing before a
+            # multi-ref output is signed, not after.
+            sorted_refs = sorted(set(refs))
             # refsHash = sha256d of concatenated refs (CHashWriter is
             # double-sha256 via CHash256; see hash.h line 131).
             refs_hash = Hash(b''.join(sorted_refs))
