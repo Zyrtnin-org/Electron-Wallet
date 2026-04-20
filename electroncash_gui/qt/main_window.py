@@ -190,6 +190,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         self.addresses_tab = self.create_addresses_tab()
         self.utxo_tab = self.create_utxo_tab()
         self.tokens_tab = self.create_tokens_tab()
+        self.nfts_tab = self.create_nfts_tab()
         self.console_tab = self.create_console_tab()
         self.contacts_tab = self.create_contacts_tab()
         tabs.addTab(self.create_history_tab(), QIcon(":icons/tab_history.png"), _('History'))
@@ -212,6 +213,9 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         # at least one FT. Wallets without any FT UTXOs see an empty list
         # even if they enable the tab, so default-off is correct.
         add_optional_tab(tabs, self.tokens_tab, QIcon(":icons/tab_coins.png"), _("To&kens"), "tokens", False)
+        # Radiant Glyph NFT singletons — same default-off rationale as the
+        # Tokens tab. Shares the glyph_ref_labels storage with the FT tab.
+        add_optional_tab(tabs, self.nfts_tab, QIcon(":icons/tab_coins.png"), _("&NFTs"), "nfts", False)
         add_optional_tab(tabs, self.contacts_tab, QIcon(":icons/tab_contacts.png"), _("Con&tacts"), "contacts")
         add_optional_tab(tabs, self.console_tab, QIcon(":icons/tab_console.png"), _("Con&sole"), "console", False)
 
@@ -713,6 +717,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         add_toggle_action(view_menu, self.addresses_tab)
         add_toggle_action(view_menu, self.utxo_tab)
         add_toggle_action(view_menu, self.tokens_tab)
+        add_toggle_action(view_menu, self.nfts_tab)
         add_toggle_action(view_menu, self.contacts_tab)
         add_toggle_action(view_menu, self.console_tab)
 
@@ -1072,6 +1077,8 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
         # __init__ ordering when tabs aren't yet attached.
         if hasattr(self, 'tokens_list') and self.tokens_list is not None:
             self.tokens_list.update()
+        if hasattr(self, 'nfts_list') and self.nfts_list is not None:
+            self.nfts_list.update()
         if hasattr(self, 'asset_combo') and self.asset_combo is not None:
             self._rebuild_asset_combo()
         self.update_completions()
@@ -2805,6 +2812,16 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
                 self.tabs.setCurrentIndex(send_idx)
         except Exception:
             pass
+
+    def create_nfts_tab(self):
+        """Radiant Glyph NFT singleton read-only viewer. Phase 1 scope:
+        list + label editing + copy. NFT sending is deferred until the
+        wallet gains a `make_unsigned_nft_transfer` that emits the
+        63-byte singleton template — the existing FT send pipeline only
+        builds 75-byte FT-holder outputs."""
+        from .nfts_list import NftsList
+        self.nfts_list = l = NftsList(self)
+        return self.create_list_tab(l)
 
     def create_contacts_tab(self):
         from .contact_list import ContactList

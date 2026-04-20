@@ -1147,6 +1147,38 @@ class Abstract_Wallet(PrintError, SPVDelegate):
             xx += x
         return cc, uu, xx
 
+    def get_nft_holdings(self):
+        """Per-UTXO view of Glyph NFT singletons owned by this wallet.
+
+        Each NFT is a distinct 36-byte ref carried by exactly one spendable
+        UTXO (the singleton invariant). Returns a list of dicts sorted by
+        height descending (newest first):
+          [{'ref': ref_hex, 'outpoint': 'txid:vout', 'value': sats,
+            'address': Address, 'height': int}, ...]
+
+        Fresh UTXO walk — cheap at desktop scale. FT holders are excluded
+        (aggregate them via get_ft_balances instead).
+        """
+        nfts = []
+        coins = self.get_utxos(exclude_frozen=True, mature=True,
+                               confirmed_only=False, exclude_slp=True,
+                               exclude_glyph=False)
+        for c in coins:
+            if c.get('glyph_kind') != 'nft_singleton':
+                continue
+            ref = c.get('glyph_ref')
+            if not ref:
+                continue
+            nfts.append({
+                'ref':      ref,
+                'outpoint': f'{c["prevout_hash"]}:{c["prevout_n"]}',
+                'value':    c['value'],
+                'address':  c['address'],
+                'height':   c.get('height', 0),
+            })
+        nfts.sort(key=lambda x: x['height'], reverse=True)
+        return nfts
+
     def get_ft_balances(self):
         """Per-ref summed photon balance across all Glyph FT holder UTXOs
         in the wallet. Returns a dict keyed by 36-byte ref hex →
