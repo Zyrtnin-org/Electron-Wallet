@@ -2382,6 +2382,101 @@ class Abstract_Wallet(PrintError, SPVDelegate):
 
         return tx
 
+    def make_unsigned_nft_transfer(
+            self, target_ref, recipient_address, config,
+            fee_rate_sats_per_byte=None):
+        """Build an unsigned Radiant Glyph NFT singleton transfer.
+
+        Spends the wallet's singleton UTXO that carries `target_ref` and
+        emits a new singleton output preserving the ref at
+        `recipient_address`. Consensus enforces singleton uniqueness via
+        OP_PUSHINPUTREFSINGLETON, so this path is strictly 1-in-1-out for
+        the NFT; a plain RXD input pays fee; optional RXD change output.
+
+        Arguments:
+          target_ref: 36-byte ref identifying the NFT to transfer.
+          recipient_address: P2PKH Address for the new owner.
+          config: SimpleConfig; currently unused, reserved.
+          fee_rate_sats_per_byte: defaults to FT_MIN_FEE_RATE (10000).
+
+        Raises:
+          SendFtError('invalid_ref') if target_ref isn't 36 bytes.
+          SendFtError('invalid_recipient') if recipient isn't P2PKH.
+          SendFtError('ref_mismatch') if no owned NFT UTXO carries ref.
+          NotEnoughRxdForFtFee if RXD inputs can't cover fee.
+        """
+        from .glyph import (
+            FT_MIN_FEE_RATE, GlyphNFTOutput, SendFtError,
+            NotEnoughRxdForFtFee,
+        )
+
+        if fee_rate_sats_per_byte is None:
+            fee_rate_sats_per_byte = FT_MIN_FEE_RATE
+        if len(target_ref) != 36:
+            raise SendFtError(
+                'invalid_ref',
+                f'target_ref must be 36 bytes, got {len(target_ref)}')
+        if recipient_address.kind != Address.ADDR_P2PKH:
+            raise SendFtError(
+                'invalid_recipient',
+                'NFT recipient must be P2PKH (singleton template is '
+                'P2PKH-based)')
+
+        target_ref_hex = target_ref.hex()
+
+        # 1. Find the singleton UTXO carrying this ref. Singletons are
+        #    1:1 with refs by consensus; pick the unique match.
+        nft_coin = None
+        all_coins = self.get_utxos(exclude_frozen=True, mature=True,
+                                   confirmed_only=False, exclude_slp=True,
+                                   exclude_glyph=False)
+        for c in all_coins:
+            if (c.get('glyph_kind') == 'nft_singleton'
+                    and c.get('glyph_ref') == target_ref_hex):
+                nft_coin = c
+                break
+        if nft_coin is None:
+            raise SendFtError(
+                'ref_mismatch',
+                f'no owned NFT singleton found for ref {target_ref_hex[:16]}…')
+
+        # 2. NFT output preserves the same sat value as the input (the
+        #    singleton's satoshis travel with the ref, by convention).
+        nft_output = (
+            TYPE_SCRIPT,
+            GlyphNFTOutput.from_pkh_ref(recipient_address.hash160, target_ref),
+            nft_coin['value'],
+        )
+
+        # 3. Pick RXD inputs to cover fee via the same bounded fixed-
+        #    point loop the FT builder uses. n_ft_in=1, n_ft_out=1 so the
+        #    estimator produces the right size for a 1 NFT-in + 1 NFT-out
+        #    shape (treated as FT holder for sizing — both scripts fit
+        #    in a single-byte script_len varint so the per-output size is
+        #    close enough).
+        change_addrs = self.get_change_addresses()
+        if not change_addrs:
+            raise SendFtError(
+                'invalid_recipient', 'wallet has no change addresses')
+        rxd_change_address = change_addrs[0]
+        rxd_coins, rxd_change, fee, n_rxd_out = self._resolve_and_pick_fee_inputs(
+            [nft_coin], nft_coin['value'], 1,
+            rxd_change_address, fee_rate_sats_per_byte)
+
+        outputs = [nft_output]
+        if rxd_change > 0:
+            outputs.append((TYPE_ADDRESS, rxd_change_address, rxd_change))
+
+        inputs = []
+        for c in [nft_coin] + rxd_coins:
+            txin = dict(c)
+            self.add_input_info(txin)
+            inputs.append(txin)
+
+        tx = Transaction.from_io(inputs, outputs)
+        self._finalize_unsigned_tx(tx)
+        return tx
+
     def is_frozen(self, addr):
         """ Address-level frozen query. Note: this is set/unset independent of
         'coin' level freezing. """

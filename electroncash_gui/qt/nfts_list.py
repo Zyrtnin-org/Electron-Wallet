@@ -3,13 +3,8 @@
 #
 # Mirrors tokens_list.py but for NFT singletons: one row per owned NFT
 # UTXO (singletons are 1:1 with their ref). Columns are label, truncated
-# ref, address, outpoint, height.
-#
-# Phase 1 scope (read-only): list + label editing + copy ref/outpoint/
-# address. NFT sending is deferred — it needs a dedicated
-# `make_unsigned_nft_transfer` in electroncash/wallet.py that emits the
-# 63-byte singleton template (d8 <ref> 75 76a914 <pkh> 88ac), because
-# the existing FT pipeline builds 75-byte holder outputs.
+# ref, address, outpoint, height. Double-click emits send_nft_requested;
+# main_window opens a destination-prompt dialog and invokes send_nft.
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
@@ -43,9 +38,7 @@ class NftsList(MyTreeWidget):
       4: Height (int; 0 = mempool)
     """
 
-    # No send_nft_requested signal in Phase 1: the receiving end would have
-    # to build a 63-byte singleton-template output, which the wallet's FT
-    # pipeline does not produce. Adding NFT send is a follow-on PR.
+    send_nft_requested = pyqtSignal(str)  # emits ref_hex
 
     class Col:
         label    = 0
@@ -68,10 +61,22 @@ class NftsList(MyTreeWidget):
         self.setSortingEnabled(True)
         self.wallet = self.parent.wallet
         self.monospaceFont = QFont(MONOSPACE_FONT)
+        self.itemDoubleClicked.connect(self._on_double_clicked)
         self.cleaned_up = False
 
     def clean_up(self):
         self.cleaned_up = True
+        try:
+            self.itemDoubleClicked.disconnect(self._on_double_clicked)
+        except TypeError:
+            pass
+
+    def _on_double_clicked(self, item, col):
+        if item is None:
+            return
+        ref_hex = item.data(self.Col.ref, Qt.UserRole)
+        if ref_hex:
+            self.send_nft_requested.emit(ref_hex)
 
     @rate_limited(1.0, ts_after=True)
     def update(self):
@@ -119,6 +124,8 @@ class NftsList(MyTreeWidget):
         if not ref_hex:
             return
         menu = QMenu()
+        menu.addAction(_('Send this NFT…'),
+                       lambda: self.send_nft_requested.emit(ref_hex))
         menu.addAction(_('Edit label…'),
                        lambda: self._edit_label(ref_hex))
         menu.addAction(_('Copy ref hex'),

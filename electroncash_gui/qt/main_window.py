@@ -2814,14 +2814,49 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             pass
 
     def create_nfts_tab(self):
-        """Radiant Glyph NFT singleton read-only viewer. Phase 1 scope:
-        list + label editing + copy. NFT sending is deferred until the
-        wallet gains a `make_unsigned_nft_transfer` that emits the
-        63-byte singleton template — the existing FT send pipeline only
-        builds 75-byte FT-holder outputs."""
+        """Radiant Glyph NFT singleton viewer. Double-clicking a row
+        opens a destination-prompt dialog and, on confirm, drives
+        Commands.send_nft to build + sign (Ledger-aware) + dry-run the
+        transfer. Full broadcast is an explicit second step."""
         from .nfts_list import NftsList
         self.nfts_list = l = NftsList(self)
+        l.send_nft_requested.connect(self._on_nfts_tab_send_requested)
         return self.create_list_tab(l)
+
+    def _on_nfts_tab_send_requested(self, ref_hex):
+        """User double-clicked / context-menu'd an NFT row. Prompt for
+        destination, call the send_nft command, show the result."""
+        from PyQt5.QtWidgets import QInputDialog, QMessageBox
+        dest, ok = QInputDialog.getText(
+            self, _('Send NFT'),
+            _('Destination P2PKH address for NFT {}:').format(
+                ref_hex[:16] + '…'),
+        )
+        if not ok or not dest.strip():
+            return
+        # Reuse the existing Commands wrapper so the console-callable and
+        # GUI paths agree on validation, fee policy, and dry-run semantics.
+        from electroncash import commands
+        cmds = commands.Commands(self.config, self.wallet, self.network)
+        pwd = self.password_dialog() if self.wallet.has_password() else None
+        result = cmds.send_nft(ref_hex, dest.strip(), dry_run=True,
+                               password=pwd)
+        if result.get('error'):
+            err = result['error']
+            QMessageBox.warning(
+                self, _('NFT send failed'),
+                _('reason: {}\n\n{}').format(err.get('reason', '?'),
+                                            err.get('message', '')))
+            return
+        tx_hex  = result.get('tx_hex') or ''
+        tx_hash = result.get('tx_hash') or ''
+        # Show the signed tx hex + txid; user decides whether to broadcast.
+        QMessageBox.information(
+            self, _('NFT send — signed (dry run)'),
+            _('txid: {}\n\nSigned tx hex copied to clipboard. Run '
+              '`broadcast` in the console, or paste to a node '
+              'testmempoolaccept, before sending.').format(tx_hash))
+        self.app.clipboard().setText(tx_hex)
 
     def create_contacts_tab(self):
         from .contact_list import ContactList

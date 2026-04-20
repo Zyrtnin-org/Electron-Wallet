@@ -1017,6 +1017,70 @@ class Commands:
         return {'broadcast': True, 'tx_hex': tx_hex, 'tx_hash': result,
                 'error': None}
 
+    @command('wp')
+    def send_nft(self, ref, destination, dry_run=True, password=None):
+        """Transfer a Radiant Glyph NFT singleton.
+
+        Arguments:
+          ref          72-char hex ref identifying the singleton.
+          destination  Radiant P2PKH address of the recipient.
+          dry_run      (default: True) — build + sign but do NOT
+                       broadcast; returns the signed tx hex.
+
+        Returns a dict with same shape as send_ft:
+          {'broadcast': bool, 'tx_hex': str, 'tx_hash': str or None,
+           'error': None or {'reason': str, 'message': str}}
+        """
+        from .address import Address
+        from .glyph import GlyphError, SendFtError
+
+        try:
+            target_ref = bytes.fromhex(ref)
+        except Exception:
+            return {'broadcast': False, 'tx_hex': None, 'tx_hash': None,
+                    'error': {'reason': 'invalid_ref',
+                              'message': 'ref is not valid hex'}}
+        if len(target_ref) != 36:
+            return {'broadcast': False, 'tx_hex': None, 'tx_hash': None,
+                    'error': {'reason': 'invalid_ref',
+                              'message': f'ref must be 36 bytes, got {len(target_ref)}'}}
+        try:
+            recipient = Address.from_string(destination)
+        except Exception as e:
+            return {'broadcast': False, 'tx_hex': None, 'tx_hash': None,
+                    'error': {'reason': 'invalid_recipient',
+                              'message': str(e)}}
+
+        try:
+            tx = self.wallet.make_unsigned_nft_transfer(
+                target_ref, recipient, self.config,
+            )
+        except SendFtError as e:
+            return {'broadcast': False, 'tx_hex': None, 'tx_hash': None,
+                    'error': {'reason': e.reason, 'message': str(e)}}
+        except GlyphError as e:
+            return {'broadcast': False, 'tx_hex': None, 'tx_hash': None,
+                    'error': {'reason': 'ref_mismatch', 'message': str(e)}}
+
+        self.wallet.sign_transaction(tx, password)
+
+        tx_hex = str(tx)
+        if dry_run:
+            return {'broadcast': False, 'tx_hex': tx_hex,
+                    'tx_hash': tx.txid(), 'error': None}
+
+        if self.network is None:
+            return {'broadcast': False, 'tx_hex': tx_hex, 'tx_hash': None,
+                    'error': {'reason': 'broadcast_failed',
+                              'message': 'daemon offline; cannot broadcast'}}
+        ok, result = self.network.broadcast_transaction(tx)
+        if not ok:
+            return {'broadcast': False, 'tx_hex': tx_hex, 'tx_hash': None,
+                    'error': {'reason': 'broadcast_failed',
+                              'message': str(result)}}
+        return {'broadcast': True, 'tx_hex': tx_hex, 'tx_hash': result,
+                'error': None}
+
     @command('')
     def help(self):
         # for the python console
@@ -1047,7 +1111,7 @@ command_options = {
     'balance':     ("-b", "Show the balances of listed addresses"),
     'change':      (None, "Show only change addresses"),
     'change_addr': ("-c", "Change address. Default is a spare address, or the source address if it's not in the wallet"),
-    'destination': (None, "Radiant P2PKH address of the FT recipient."),
+    'destination': (None, "Radiant P2PKH address of the Glyph token recipient (FT or NFT)."),
     'domain':      ("-D", "List of addresses"),
     'dry_run':     (None, "If true (default), build and sign the tx but do NOT broadcast. Caller is expected to run testmempoolaccept or broadcast separately. Pass false to broadcast."),
     'encrypt_file':(None, "Whether the file on disk should be encrypted with the provided password"),
@@ -1079,7 +1143,7 @@ command_options = {
     'pending':     (None, "Show only pending requests."),
     'privkey':     (None, "Private key. Set to '?' to get a prompt."),
     'receiving':   (None, "Show only receiving addresses"),
-    'ref':         (None, "72-char hex ref identifying a Radiant Glyph FT (32-byte txid + 4-byte vout LE = 36 bytes, hex-encoded)."),
+    'ref':         (None, "72-char hex ref identifying a Radiant Glyph token (FT or NFT singleton; 32-byte txid + 4-byte vout LE = 36 bytes, hex-encoded)."),
     'seed_type':   (None, "The type of seed to create, currently: 'electrum' and 'bip39' is supported. Default 'bip39'."),
     'show_addresses': (None, "Show input and output addresses"),
     'show_fiat':   (None, "Show fiat value of transactions"),

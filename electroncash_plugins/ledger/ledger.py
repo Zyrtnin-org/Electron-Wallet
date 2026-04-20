@@ -407,8 +407,8 @@ class Ledger_KeyStore(Hardware_KeyStore):
                         # an OP_RETURN. Skip the OP_RETURN parser for them;
                         # the Radiant Ledger firmware accepts the 75B/63B
                         # templates natively.
-                        from electroncash.glyph import GlyphFTOutput
-                        is_glyph = isinstance(address, GlyphFTOutput)
+                        from electroncash.glyph import GlyphFTOutput, GlyphNFTOutput
+                        is_glyph = isinstance(address, (GlyphFTOutput, GlyphNFTOutput))
                         if not is_glyph:
                             try:
                                 # Ledger has a maximum output size of 200 bytes:

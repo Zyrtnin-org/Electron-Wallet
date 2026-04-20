@@ -46,8 +46,9 @@ from .core import (
     REF_LABEL_MAX_LEN,
     # Label helper
     sanitize_ref_label,
-    # Output builder
+    # Output builders
     GlyphFTOutput,
+    GlyphNFTOutput,
     # Exceptions
     GlyphError,
     GlyphInvalidScript,
@@ -72,4 +73,5 @@ from .wallet_data import WalletData
 # exposes ScriptOutput as the registration target.
 from ..address import ScriptOutput as _ScriptOutput
 _ScriptOutput.protocol_classes.add(GlyphFTOutput)
+_ScriptOutput.protocol_classes.add(GlyphNFTOutput)
 del _ScriptOutput

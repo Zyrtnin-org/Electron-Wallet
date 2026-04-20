@@ -25,6 +25,7 @@ from .classifier import (
     NFT_SINGLETON_LEN,
     _FT_TAIL_BYTES,
     is_ft_holder,
+    is_nft_singleton,
 )
 
 # --- Policy constants ------------------------------------------------------
@@ -47,6 +48,15 @@ FT_DUST_THRESHOLD: Final[int] = 2_000_000
 _FT_PREFIX: Final[bytes] = bytes.fromhex('76a914')
 _FT_MID:    Final[bytes] = bytes.fromhex('88acbdd0')
 _FT_TAIL:   Final[bytes] = _FT_TAIL_BYTES
+
+# NFT singleton template: d8 <ref:36> 75 76a914 <pkh:20> 88ac (63 bytes).
+# d8 = OP_PUSHINPUTREFSINGLETON; 75 = OP_DROP; the P2PKH epilogue is the
+# spending destination — spend script is <sig> <pubkey> like a plain
+# P2PKH. Byte layout verified against the classifier's is_nft_singleton
+# check and the 24 golden vectors in tests/test_glyph_classifier.py.
+_NFT_PREFIX: Final[bytes] = bytes.fromhex('d8')
+_NFT_MID:    Final[bytes] = bytes.fromhex('7576a914')
+_NFT_TAIL:   Final[bytes] = bytes.fromhex('88ac')
 
 # Ref length (32B hash + 4B vout LE = 36B total). Pinned here; see module
 # docstring above for the canonical encoding. The full 36 bytes are what
@@ -222,6 +232,57 @@ class GlyphFTOutput(ScriptOutput):
         NOT slice off the vout suffix before hashing. The entire 36
         bytes are serialized into the refs hash input."""
         return self.script[27:63]
+
+
+# --- GlyphNFTOutput --------------------------------------------------------
+
+class GlyphNFTOutput(ScriptOutput):
+    """Output-side representation of a Radiant Glyph NFT singleton
+    (63-byte template d8 <ref:36> 75 76a914 <pkh:20> 88ac).
+
+    NFTs are singletons: the consensus ref opcode is OP_PUSHINPUTREFSINGLETON
+    (0xd8), which requires the ref to appear in exactly one input of the
+    spending tx. So a transfer is built as: spend the existing singleton
+    UTXO (ref is present in the input) → emit a new singleton output with
+    the same ref at the recipient's pkh. Unlike FTs, NFT transfers don't
+    have a per-output conservation tail — the singleton invariant is
+    enforced by the consensus opcode itself."""
+
+    attrs_extra = ('pkh', 'ref')
+
+    def __new__(cls, script: bytes) -> 'GlyphNFTOutput':
+        if not is_nft_singleton(script):
+            raise GlyphInvalidScript(
+                f'not a valid NFT singleton script (len={len(script)})'
+            )
+        return super().__new__(cls, script)
+
+    @classmethod
+    def from_pkh_ref(cls, pkh: bytes, ref: bytes) -> 'GlyphNFTOutput':
+        """Build a 63-byte NFT singleton output from pkh + ref."""
+        if len(pkh) != PKH_LEN:
+            raise GlyphInvalidScript(
+                f'pkh must be {PKH_LEN} bytes, got {len(pkh)}'
+            )
+        if len(ref) != REF_LEN:
+            raise GlyphInvalidScript(
+                f'ref must be {REF_LEN} bytes, got {len(ref)}'
+            )
+        return cls(_NFT_PREFIX + ref + _NFT_MID + pkh + _NFT_TAIL)
+
+    @classmethod
+    def protocol_match(cls, script: bytes) -> bool:
+        return is_nft_singleton(script)
+
+    @property
+    def pkh(self) -> bytes:
+        """20-byte pubkey hash from the P2PKH epilogue at bytes 41..60."""
+        return self.script[41:61]
+
+    @property
+    def ref(self) -> bytes:
+        """36-byte ref (32B hash + 4B vout LE) from bytes 1..36."""
+        return self.script[1:37]
 
 
 # --- Public helpers used by builder (PR D) ---------------------------------
