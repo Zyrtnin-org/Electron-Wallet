@@ -10,6 +10,12 @@ Three transactions, each signed on a Ledger Nano S Plus running the community [`
 
 Rows 1 and 2 used a direct-APDU harness (minimal host wrapping around the Ledger protocol). Row 3 is the first Radiant Glyph asset signed through a full wallet integration with UTXO selection, fee calculation, and change routing — the prerequisite for end-user Ledger signing.
 
+## Known wallet-side gap — NFT transfer
+
+Wallet-driven NFT transfers (via the Tokens-tab equivalent "Send NFT" dialog) build the correct 63-byte singleton output and reach the firmware's `finalizeInput`, but that APDU returns `SW_TECHNICAL_PROBLEM_2` (0x6F0F) on `lib-app-bitcoin` tag `f8c8a4a`. The `af0cd27d` proof above shows the firmware itself CAN sign NFT transfers; the direct-APDU harness reaches it through a different code path than btchip's streaming `e04a FF … / e04a 80 …` sequence. The discrepancy is not a chunk-size overflow (buffer is already 200B) — most likely an interaction between how `finalizeInput`'s output-streaming frames the 63-byte NFT output and how the firmware's per-output FSM or change-path comparison handles it.
+
+The pipeline code (`GlyphNFTOutput`, `make_unsigned_nft_transfer`, `Commands.send_nft`, plugin bypass for `GlyphNFTOutput`, GUI dialog) is committed and correct at the wallet layer; the residual blocker is a firmware-side debug requiring a `PRINTF`-enabled build to trace which byte the FSM rejects.
+
 ## How to verify yourself
 
 ```bash
