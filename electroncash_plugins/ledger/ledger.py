@@ -547,6 +547,14 @@ class LedgerPlugin(HW_PluginBase):
                    (0x2c97, 0x0005), # Nano-S-Plus
                    (0x2c97, 0x5011), # Nano-S-Plus app-bitcoin >= 1.5.1
                    (0x2c97, 0x5015), # Nano-S-Plus app-bitcoin >= 1.5.1
+                   # Newer BOLOS OS (firmware ~2.2+) reports a unified PID
+                   # regardless of which app is open. Confirmed against a
+                   # live Nano S+ running a recent firmware: the device
+                   # enumerates as 0x2c97:0x5000 with HID_NAME="Ledger Nano
+                   # S+" and the Radiant app open. Without this entry, the
+                   # plugin's DEVICE_IDS whitelist never matches and the
+                   # device manager reports "no hardware device detected".
+                   (0x2c97, 0x5000), # Nano-S-Plus (unified BOLOS PID)
                  ]
 
     def __init__(self, parent, config, name):
@@ -561,10 +569,27 @@ class LedgerPlugin(HW_PluginBase):
         if device.product_key[0] == 0x2581 and device.product_key[1] == 0x4b7c:
             ledger = True
         if device.product_key[0] == 0x2c97:
-            if device.interface_number == 0 or device.usage_page == 0xffa0:
-                ledger = True
+            # Newer BOLOS OS (firmware ~2.2+, PID 0x5000 on Nano S+) keeps
+            # interface 0 under the kernel HID driver (where the user
+            # process can't open it without first detaching the kernel
+            # driver — which hidapi doesn't do). On those devices the
+            # APDU endpoint is interface 2 and it uses Ledger channel
+            # framing (0x0101 wrapping, equivalent of btchip's ledger=True
+            # mode on HW.1 devices).
+            #
+            # Older firmwares (PIDs 0x0001, 0x0005, etc) expose APDUs on
+            # interface 0 with raw framing — the classic path.
+            pid = device.product_key[1]
+            if pid == 0x5000:
+                if device.interface_number == 2 or device.usage_page == 0xffa0:
+                    ledger = True  # channel-framed APDUs on iface 2
+                else:
+                    return None  # interface 0 held by kernel; open would fail
             else:
-                return None  # non-compatible interface of a nano s or blue
+                if device.interface_number == 0 or device.usage_page == 0xffa0:
+                    ledger = False
+                else:
+                    return None  # non-compatible interface of a nano s or blue
         dev = hid.device()
         dev.open_path(device.path)
         dev.set_nonblocking(True)

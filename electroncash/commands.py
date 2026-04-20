@@ -1047,7 +1047,9 @@ command_options = {
     'balance':     ("-b", "Show the balances of listed addresses"),
     'change':      (None, "Show only change addresses"),
     'change_addr': ("-c", "Change address. Default is a spare address, or the source address if it's not in the wallet"),
+    'destination': (None, "Radiant P2PKH address of the FT recipient."),
     'domain':      ("-D", "List of addresses"),
+    'dry_run':     (None, "If true (default), build and sign the tx but do NOT broadcast. Caller is expected to run testmempoolaccept or broadcast separately. Pass false to broadcast."),
     'encrypt_file':(None, "Whether the file on disk should be encrypted with the provided password"),
     'entropy':     (None, "Custom entropy"),
     'expiration':  (None, "Time in seconds"),
@@ -1060,6 +1062,7 @@ command_options = {
     'funded':      (None, "Show only funded addresses"),
     'imax':        (None, "Maximum number of inputs"),
     'index_url':   (None, 'Override the URL where you would like users to be shown the BIP70 Payment Request'),
+    'label':       (None, "Label text (FT ref label; sanitized on save)."),
     'labels':      ("-l", "Show the labels of listed addresses"),
     'language':    ("-L", "Default language for wordlist"),
     'locktime':    (None, "Set locktime block number"),
@@ -1076,6 +1079,7 @@ command_options = {
     'pending':     (None, "Show only pending requests."),
     'privkey':     (None, "Private key. Set to '?' to get a prompt."),
     'receiving':   (None, "Show only receiving addresses"),
+    'ref':         (None, "72-char hex ref identifying a Radiant Glyph FT (32-byte txid + 4-byte vout LE = 36 bytes, hex-encoded)."),
     'seed_type':   (None, "The type of seed to create, currently: 'electrum' and 'bip39' is supported. Default 'bip39'."),
     'show_addresses': (None, "Show input and output addresses"),
     'show_fiat':   (None, "Show fiat value of transactions"),
@@ -1104,6 +1108,7 @@ arg_types = {
     'outputs': json_loads,
     'fee': lambda x: str(PyDecimal(x)) if x is not None else None,
     'amount': lambda x: str(PyDecimal(x)) if x != '!' else '!',
+    'dry_run': lambda x: str(x).lower() not in ('false', '0', 'no', ''),
     'locktime': int,
 }
 
