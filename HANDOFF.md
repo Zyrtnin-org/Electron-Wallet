@@ -117,19 +117,29 @@ automated test that re-signs a historical tx: see
 
 ## What's NEXT
 
-### 1. Ledger FT-signing live test (the immediate next step)
+### 1. Ledger FT-signing live test (blocked on firmware rebuild)
 
-**Firmware audit this session concluded the firmware is already mostly
-ready.** `/home/eric/apps/app-radiant/lib-app-bitcoin/helpers.c` has a
-generic opcode walker that handles both `OP_PUSHINPUTREF` (0xD0) and
-`OP_PUSHINPUTREFSINGLETON` (0xD8), a streaming `hashOutputHashes`
-accumulator, and the preimage order is correct (see `transaction.c:727`).
-The plugin side (`electroncash_plugins/ledger/ledger.py:366`) calls
-`Transaction.get_preimage_script(txin)` which we already updated in PR B
-to return the full 75B/63B script for Glyph inputs.
+**Wallet-side is ready.** Both the protocol and connectivity layers
+are now handled:
+- `get_preimage_script` returns full 75B/63B for Glyph inputs (PR B)
+- `electroncash_plugins/ledger/ledger.py` supports Nano S+ on BOLOS 2.x
+  (PID 0x5000, interface 2, channel framing — commits `99584204` on
+  glyph-ft-all / `370dadfa` on feat/glyph-ft-commands)
+- `commands.py` knows the FT command parameter names so the CLI parser
+  doesn't crash at startup
 
-So Ledger FT signing **should just work** — needs hardware confirmation.
-**Estimate: ~1 day including UX polish.**
+**Firmware-side is blocked.** Live-test attempted 2026-04-19 against
+a Nano S+ on BOLOS 2.4.10. The Radiant app binary currently installed
+on the device doesn't register HID descriptors cleanly on BOLOS 2.x:
+the USB device enumerates (lsusb sees it as `2c97:5000 Ledger Nano
+S+`) but no `/dev/hidraw` nodes are created, so the plugin has nothing
+to open. This is a firmware-side incompatibility — the Radiant app
+source at `/home/eric/apps/app-radiant/` looks BOLOS-compliant in the
+code audit, but the installed binary predates the current BOLOS SDK.
+
+**To unblock:** rebuild the Radiant Ledger app against a current BOLOS
+SDK, side-load to the device, retry the test below. Likely 30-60 min
+of firmware work + toolchain setup.
 
 Test plan:
 
