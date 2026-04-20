@@ -401,16 +401,25 @@ class Ledger_KeyStore(Hardware_KeyStore):
                     if not _type in [TYPE_ADDRESS, TYPE_SCRIPT]:
                         self.give_error(_('Only address and script outputs are supported by {}').format(self.device))
                     if _type == TYPE_SCRIPT:
-                        try:
-                            # Ledger has a maximum output size of 200 bytes:
-                            # https://github.com/LedgerHQ/ledger-app-btc/commit/3a78dee9c0484821df58975803e40d58fbfc2c38#diff-c61ccd96a6d8b54d48f54a3bc4dfa7e2R26
-                            # which gives us a maximum OP_RETURN payload size of
-                            # 187 bytes. It also apparently has no limit on
-                            # max_pushes, so we specify max_pushes=None so as
-                            # to bypass that check.
-                            validate_op_return_output_and_get_data(o, max_size=187, max_pushes=None)
-                        except RuntimeError as e:
-                            self.give_error('{}: {}'.format(self.device, str(e)))
+                        # Radiant Glyph outputs (FT holders, NFT singletons,
+                        # mint-authority scripts) are TYPE_SCRIPT because the
+                        # script is a P2PKH with appended ref/tag bytes — not
+                        # an OP_RETURN. Skip the OP_RETURN parser for them;
+                        # the Radiant Ledger firmware accepts the 75B/63B
+                        # templates natively.
+                        from electroncash.glyph import GlyphFTOutput
+                        is_glyph = isinstance(address, GlyphFTOutput)
+                        if not is_glyph:
+                            try:
+                                # Ledger has a maximum output size of 200 bytes:
+                                # https://github.com/LedgerHQ/ledger-app-btc/commit/3a78dee9c0484821df58975803e40d58fbfc2c38#diff-c61ccd96a6d8b54d48f54a3bc4dfa7e2R26
+                                # which gives us a maximum OP_RETURN payload size of
+                                # 187 bytes. It also apparently has no limit on
+                                # max_pushes, so we specify max_pushes=None so as
+                                # to bypass that check.
+                                validate_op_return_output_and_get_data(o, max_size=187, max_pushes=None)
+                            except RuntimeError as e:
+                                self.give_error('{}: {}'.format(self.device, str(e)))
                 info = tx.output_info.get(address)
                 if (info is not None) and len(tx.outputs()) > 1 \
                         and not has_change:
@@ -569,27 +578,27 @@ class LedgerPlugin(HW_PluginBase):
         if device.product_key[0] == 0x2581 and device.product_key[1] == 0x4b7c:
             ledger = True
         if device.product_key[0] == 0x2c97:
-            # Newer BOLOS OS (firmware ~2.2+, PID 0x5000 on Nano S+) keeps
-            # interface 0 under the kernel HID driver (where the user
-            # process can't open it without first detaching the kernel
-            # driver — which hidapi doesn't do). On those devices the
-            # APDU endpoint is interface 2 and it uses Ledger channel
-            # framing (0x0101 wrapping, equivalent of btchip's ledger=True
-            # mode on HW.1 devices).
+            # Framing + endpoint selection:
             #
-            # Older firmwares (PIDs 0x0001, 0x0005, etc) expose APDUs on
-            # interface 0 with raw framing — the classic path.
+            # - Older PIDs (0x0001, 0x0005, 0x0011, 0x1015, 0x4015, etc):
+            #   APDUs on interface 0 with raw framing. This is the classic
+            #   btchip path.
+            #
+            # - PID 0x5000 (unified BOLOS OS for Nano S+ firmware ~2.2+):
+            #   APDUs still on interface 0, but using Ledger channel
+            #   framing (0x0101 wrapping). Verified live with an
+            #   E0 C4 00 00 00 probe on a Nano S+ at BOLOS 2.4.10:
+            #   iface 0 + ledger=True  → valid response (version 2.4.10)
+            #   iface 0 + ledger=False → hangs forever
+            #   iface 2 + either      → returns garbage or times out
+            #
+            # Reject iface 2 entirely on 0x5000 so the device manager
+            # doesn't try the wrong endpoint.
             pid = device.product_key[1]
-            if pid == 0x5000:
-                if device.interface_number == 2 or device.usage_page == 0xffa0:
-                    ledger = True  # channel-framed APDUs on iface 2
-                else:
-                    return None  # interface 0 held by kernel; open would fail
+            if device.interface_number == 0 or device.usage_page == 0xffa0:
+                ledger = (pid == 0x5000)  # channel framing only on new PID
             else:
-                if device.interface_number == 0 or device.usage_page == 0xffa0:
-                    ledger = False
-                else:
-                    return None  # non-compatible interface of a nano s or blue
+                return None  # non-compatible interface of a nano s or blue
         dev = hid.device()
         dev.open_path(device.path)
         dev.set_nonblocking(True)
@@ -612,7 +621,14 @@ class LedgerPlugin(HW_PluginBase):
             # BaseWizard expects this Exception to re-try
             raise OSError(_('Device id not found or was changed'))
         client.handler = self.create_handler(wizard)
-        client.get_xpub("m/44'/0'/0'", 'standard')  # BIP44 coin type 0 (Bitcoin/Radiant)
+        # SLIP-44 coin type 512 = Radiant (0x200). The Radiant Ledger
+        # firmware has PATH_APP_LOAD_PARAMS hard-locked to "*/512'" only;
+        # deriving under coin type 0 (Bitcoin) returns 0x6A80 "incorrect
+        # data" because the firmware refuses the path. The old comment
+        # on this line claimed coin type 0 worked for both Bitcoin and
+        # Radiant — true on upstream Electron-Cash, wrong for this
+        # Radiant-locked fork.
+        client.get_xpub("m/44'/512'/0'", 'standard')
 
     def get_xpub(self, device_id, derivation, xtype, wizard):
         devmgr = self.device_manager()

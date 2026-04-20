@@ -743,7 +743,11 @@ is_bip32_key = lambda x: is_xprv(x) or is_xpub(x)
 
 def bip44_derivation(account_id):
     bip  = 44
-    coin = 1 if networks.net.TESTNET else 0
+    # SLIP-44 coin type 512 = Radiant (0x200). The Ledger Radiant app
+    # firmware hard-locks derivation paths to */512' only; using coin
+    # type 0 (Bitcoin's legacy slot) returns 0x6A80 from the device.
+    # Testnet is coin type 1 to match upstream convention.
+    coin = 1 if networks.net.TESTNET else 512
     return "m/%d'/%d'/%d'" % (bip, coin, int(account_id))
 
 def bip39_normalize_passphrase(passphrase):
